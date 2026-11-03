@@ -208,6 +208,18 @@ test("runNaming：invalid_keep_title 触发一次带反馈的重试",async()=>{
   assert.ok(contexts[1].title_format_feedback);
 });
 
+test("runNaming：invalid_keep_title 重试时用量按两轮并集合计",async()=>{
+  // 首轮独有键也必须保留：只遍历次轮的键会静默丢统计
+  const {backend}=makeBackend({
+    read:async()=>({...baseRead,title:"不合规的旧标题没有分隔符"}),
+    generate:async context=>context.title_format_feedback
+      ? {finishReason:"stop",text:JSON.stringify({action:"rename",title:"🧩 邮箱注册｜验证码修复",reason:"已修正"}),usage:{outputTokens:7,secondOnly:2}}
+      : {finishReason:"stop",text:JSON.stringify({action:"keep",title:"任意",reason:"x"}),usage:{outputTokens:5,firstOnly:3}}
+  });
+  const result=await runNaming({backend,selection:{}});
+  assert.deepEqual(result.usage,{firstOnly:3,outputTokens:12,secondOnly:2});
+});
+
 test("runNaming：pendingTitle 对账——宿主已落库则确认并清理",async()=>{
   const {backend,saved}=makeBackend({
     read:async()=>({...baseRead,title:"🧩 邮箱注册｜验证码修复"}),

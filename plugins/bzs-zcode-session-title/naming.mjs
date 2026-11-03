@@ -72,7 +72,12 @@ export async function runNaming({backend,selection,state={},apply=false,eventUse
     // keep 的原标题不符合统一结构：追加反馈重试一次，要求 rename
     const firstUsage=generated.usage;
     generated=await backend.generate({...finalContext,title_format_feedback:"原标题不符合规范，不能 keep；请返回 rename 与合法的类别 对象｜目标标题"},selection);
-    if(firstUsage&&generated.usage)generated.usage=Object.fromEntries(Object.keys(generated.usage).map(key=>[key,(firstUsage[key]??0)+generated.usage[key]]));
+    // 两次调用的用量按并集合计：只出现在首轮的键也计入，不能只遍历次轮
+    if(firstUsage&&generated.usage) {
+      const merged={...firstUsage};
+      for(const [key,value] of Object.entries(generated.usage))merged[key]=(merged[key]??0)+value;
+      generated.usage=merged;
+    }
     candidate=candidateFrom(generated,before.title,{...options,requireFormat:true});
   }
   const result={status:"preview",action:candidate.action,title:candidate.title,reason:candidate.reason,usage:generated.usage};

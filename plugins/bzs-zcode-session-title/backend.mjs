@@ -1,11 +1,9 @@
 // 原宿主通道适配层：写操作（改名）与模型调用统一经公共网关 RPC，
 // 会话数据读取统一走 history.mjs 持久层；本模块不含业务状态机。
-import {connectHost} from "./gateway/connect.mjs";
+import {connectHost,withGatewayRetry} from "./gateway/connect.mjs";
 import {readHistory,conversationSnapshot,sessionExistsInSessionDb,loadIndexRow,SESSION_ID_RE} from "./history.mjs";
 import {validateSelection} from "./config.mjs";
 import {readTitlePolicy} from "./vendor/title-policy.mjs";
-
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
 export function createBackend({event,config,saveState,prompt,connect=connectHost,retryDelaysMs=[10000,30000]}) {
   const sessionId=event.session_id;
@@ -39,18 +37,14 @@ export function createBackend({event,config,saveState,prompt,connect=connectHost
     return remote;
   };
   // 网关忙时首个大调用可能被瞬断（gateway_rpc_protocol_error）：fault 已 reject 的
-  // 连接无法复用，必须断开重连；按退避间隔重试，每个延迟只用一次。
-  const call=async(channel,method,args=[])=>{
-    const delays=[...retryDelaysMs];
-    for(;;) {
-      try {return await (await attach()).call(channel,method,args);}
-      catch(error) {
-        if(error.reasonCode!=="gateway_rpc_protocol_error"||!delays.length)throw error;
-        remote?.close();remote=null;
-        await sleep(delays.shift());
-      }
+  // 连接无法复用，丢弃后由下次 attach 重连；退避策略与 connect.mjs 共用同一份定义。
+  const call=(channel,method,args=[])=>withGatewayRetry(async()=>{
+    try {return await (await attach()).call(channel,method,args);}
+    catch(error) {
+      if(error.reasonCode==="gateway_rpc_protocol_error") {remote?.close();remote=null;}
+      throw error;
     }
-  };
+  },{retryDelaysMs});
   return {
     async read() {
       const ws=await resolveWorkspace();

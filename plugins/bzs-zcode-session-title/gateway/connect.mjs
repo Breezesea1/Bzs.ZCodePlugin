@@ -78,17 +78,24 @@ export async function probeHost(options) {
 
 // 网关忙时 attach 后首个大调用可能被瞬断（gateway_rpc_protocol_error）：
 // fault 已 reject 的连接无法复用，必须断开重连。按退避间隔重试，每个延迟只用一次。
-// 所有命令通道（models/生成/改名）共用，默认 10s/30s，实测该窗口重试即恢复。
-export async function callWithRetry(connectHost,options,work,{retryDelaysMs=[10000,30000]}={}) {
+// 可重试错误码与退避时长只在此处定义，所有命令通道（models/生成/改名/探测）共用，
+// 默认 10s/30s，实测该窗口重试即恢复。
+export async function withGatewayRetry(attempt,{retryDelaysMs=[10000,30000]}={}) {
   const delays=[...retryDelaysMs];
   for(;;) {
-    let connection;
-    try {
-      connection=await connectHost(options);
-      return await work(connection);
-    } catch(error) {
+    try {return await attempt();}
+    catch(error) {
       if(error.reasonCode!=="gateway_rpc_protocol_error"||!delays.length)throw error;
       await new Promise(r=>setTimeout(r,delays.shift()));
-    } finally {connection?.close();}
+    }
   }
+}
+
+// 每次尝试独立建连并在结束时关闭；重连间隔由 withGatewayRetry 统一控制
+export function callWithRetry(connectHost,options,work,{retryDelaysMs=[10000,30000]}={}) {
+  return withGatewayRetry(async()=>{
+    const connection=await connectHost(options);
+    try {return await work(connection);}
+    finally {connection.close();}
+  },{retryDelaysMs});
 }

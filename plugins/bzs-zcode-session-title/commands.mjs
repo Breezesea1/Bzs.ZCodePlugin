@@ -3,7 +3,7 @@
 // 本模块不触碰 process 与 stdin；数据访问在 history.mjs，网关协议在 gateway/。
 import {readFile} from "node:fs/promises";
 import {basename,join} from "node:path";
-import {probeHost} from "./gateway/connect.mjs";
+import {probeHost,callWithRetry,connectHost} from "./gateway/connect.mjs";
 import {runNaming} from "./naming.mjs";
 import {runDoctor} from "./doctor.mjs";
 import {readTitlePolicy,writeTitlePolicy} from "./vendor/title-policy.mjs";
@@ -33,7 +33,6 @@ async function commandRun({backend,event,config,apply,statePath}) {
 
 async function commandModels({event,config}) {
   // 模型目录查询不需要会话：不带 session_id 附着，避免占位会话被宿主拒绝
-  const {connectHost,callWithRetry}=await import("./gateway/connect.mjs");
   const options={
     workspacePath:event.workspace_path??event.cwd??process.cwd(),
     gatewayConfigPath:config.gatewayConfigPath,
