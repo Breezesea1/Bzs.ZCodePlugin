@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "bzs-token-speed": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/server/mcp.mjs"],
+      "env": {
+        "TOKEN_SPEED_PLUGIN_DATA": "${CLAUDE_PLUGIN_DATA}"
+      }
+    }
+  }
+}

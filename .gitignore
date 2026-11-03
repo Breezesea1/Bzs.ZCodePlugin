@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# plugin runtime data (logs, state, sqlite)
+state/
+*.log
+*.sqlite
+*.sqlite-*
+
+# local secrets / env overrides
+.env
+.env.*
+
+# editors & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${ZCODE_PLUGIN_ROOT}/hook.mjs\" --config \"${ZCODE_PLUGIN_DATA}/config.json\"",
+            "async": true,
+            "timeoutMs": 60000
+          }
+        ]
+      }
+    ]
+  }
+}
