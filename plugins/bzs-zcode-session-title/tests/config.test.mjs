@@ -70,10 +70,10 @@ test("loadConfig：rename 参数范围校验",async()=>{
   }
 });
 
-test("loadConfig：SQLITE_BIN 环境变量作为 sqliteBin 兜底",async()=>{
-  const {path,cleanup}=await withConfig({selection:validSelection});
-  const {config}=await loadConfig(path,{env:{SQLITE_BIN:"C:/bin/sqlite3.exe"}});
-  assert.equal(config.sqliteBin,"C:/bin/sqlite3.exe");
+test("loadConfig：已废弃的 sqliteBin 字段被忽略",async()=>{
+  const {path,cleanup}=await withConfig({selection:validSelection,sqliteBin:"C:/bin/sqlite3.exe"});
+  const {config}=await loadConfig(path,{env:{}});
+  assert.equal(config.sqliteBin,undefined);
   await cleanup();
 });
 

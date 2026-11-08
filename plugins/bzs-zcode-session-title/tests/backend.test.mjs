@@ -4,7 +4,7 @@ import {createBackend} from "../backend.mjs";
 
 const config={
   sessionDb:"D:/no-such-db.sqlite",indexDb:"D:/no-such-index.sqlite",
-  timeoutMs:5000,sqliteBin:"sqlite3",
+  timeoutMs:5000,
   titlePolicyDirectory:"D:/no-such-policy"
 };
 const event={session_id:"sess_direct1",workspace_path:"D:\w"};

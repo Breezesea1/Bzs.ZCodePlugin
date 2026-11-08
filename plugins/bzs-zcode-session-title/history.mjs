@@ -1,8 +1,8 @@
 // 会话持久层：与宿主一致以 SQLite 会话库/任务索引为权威。
 // session 行提供标题与归属目录，message/part 行重建有效对话轮；
 // revert 记录回退点，快照只反映用户实际看到的对话状态。
-import {execFile} from "node:child_process";
-import {promisify} from "node:util";
+// 用 Node 22+ 内置 node:sqlite 只读打开，无外部依赖。
+import {DatabaseSync} from "node:sqlite";
 import {win32} from "node:path";
 import {createHash} from "node:crypto";
 import {getConversationMessageProjectionPolicy} from "./vendor/projection.js";
@@ -11,31 +11,50 @@ export const SESSION_ID_RE=/^sess(?:ion)?_[A-Za-z0-9_-]+$/;
 
 const samePath=(a,b)=>win32.normalize(String(a??"")).toLowerCase()===win32.normalize(String(b??"")).toLowerCase();
 
-// sqlite3 CLI 只读查询 → JSON 行。空结果输出空串，返回 []。
-export async function queryJson(dbPath,sql,sqliteBin="sqlite3") {
-  const {stdout}=await promisify(execFile)(sqliteBin,["-readonly","-json",dbPath,sql],{encoding:"utf8",windowsHide:true,maxBuffer:256*1024*1024});
-  return stdout.trim()?JSON.parse(stdout):[];
+// 只读连接缓存：worker 短命，同一库会查多次（行存在性、会话行、历史）。
+const readers=new Map();
+function readOnly(dbPath) {
+  let db=readers.get(dbPath);
+  if(!db) {
+    db=new DatabaseSync(dbPath,{readOnly:true});
+    db.exec("PRAGMA busy_timeout = 3000");
+    readers.set(dbPath,db);
+  }
+  return db;
+}
+
+export function closeHistoryConnections() {
+  for(const db of readers.values()) {
+    try {db.close();}catch {}
+  }
+  readers.clear();
+}
+
+// 只读查询 → 行数组。SQL 一律参数化，杜绝拼接注入。
+export function queryAll(dbPath,sql,params=[]) {
+  return readOnly(dbPath).prepare(sql).all(...params);
 }
 
 // 会话归属列：宿主新库写 path，旧库只有 directory；coalesce 两者取一。
 const SESSION_DIRECTORY_SQL=`coalesce(path,directory)`;
 
-async function readSessionRow(dbPath,sessionId,sqliteBin) {
-  const rows=await queryJson(dbPath,`SELECT id,${SESSION_DIRECTORY_SQL} AS directory,title,revert,title_source AS titleSource FROM session WHERE id='${sessionId}';`,sqliteBin);
+function readSessionRow(dbPath,sessionId) {
+  const rows=queryAll(dbPath,`SELECT id,${SESSION_DIRECTORY_SQL} AS directory,title,revert,title_source AS titleSource FROM session WHERE id=?`,[sessionId]);
   if(!rows.length)throw new Error("会话不在指定 SQLite 库中");
   const row=rows[0];
   return {id:row.id,directory:row.directory,title:row.title,revert:row.revert?JSON.parse(row.revert):null,titleSource:row.titleSource};
 }
 
-export async function sessionExistsInSessionDb({dbPath,sessionId,sqliteBin}) {
-  return (await queryJson(dbPath,`SELECT 1 AS ok FROM session WHERE id='${sessionId}' LIMIT 1;`,sqliteBin)).length>0;
+export function sessionExistsInSessionDb({dbPath,sessionId}) {
+  return queryAll(dbPath,"SELECT 1 AS ok FROM session WHERE id=? LIMIT 1",[sessionId]).length>0;
 }
 
 // 索引行每次现查：rename 前后 title/archived 会变化，不能缓存。
 // cli_title 是外部进程的写入位：宿主镜像 title 列有延迟窗口，读回校验须读自己的写入。
-export async function loadIndexRow({dbPath,sessionId,sqliteBin}) {
-  try {return (await queryJson(dbPath,`SELECT task_id,workspace_path,title,title_overridden AS titleOverridden,cli_title AS cliTitle,cli_title_source AS cliTitleSource,archived,deleted,task_status AS taskStatus FROM tasks WHERE task_id='${sessionId}';`,sqliteBin))[0]??null;}
-  catch {return null;}
+export function loadIndexRow({dbPath,sessionId}) {
+  try {
+    return queryAll(dbPath,"SELECT task_id,workspace_path,title,title_overridden AS titleOverridden,cli_title AS cliTitle,cli_title_source AS cliTitleSource,archived,deleted,task_status AS taskStatus FROM tasks WHERE task_id=?",[sessionId])[0]??null;
+  } catch {return null;}
 }
 
 // UI 同款标题解析：title_overridden=1（用户手动改名）以 title 为准，否则用 cli_title 写入位
@@ -45,21 +64,30 @@ export function displayTitleOf(row) {
   return row.cliTitle??row.title;
 }
 
-export async function readHistory({dbPath,sessionId,workspacePath,sqliteBin="sqlite3"}) {
+export function readHistory({dbPath,sessionId,workspacePath}) {
   if(!SESSION_ID_RE.test(sessionId??""))throw new Error("无效会话 ID");
-  const session=await readSessionRow(dbPath,sessionId,sqliteBin);
+  const session=readSessionRow(dbPath,sessionId);
   // 会话归属以库中记录为权威：Stop 事件的 cwd 是窗口当前目录，可能已被切换
   if(workspacePath&&!samePath(session.directory,workspacePath))throw new Error("会话数据库的工作区不匹配");
-  // 单次只读查询取齐两表；大历史下行数可能很多，放宽输出缓冲。
-  // 消息按时间排序，部件在所属消息内按 sequence 排序（ID 是随机串，不能当顺序）。
-  const quoted="'"+sessionId+"'";
-  const sql=[
-    "PRAGMA query_only=ON; BEGIN;",
-    "SELECT 'message' kind,id,'' message_id,sequence IS NULL missing_seq,sequence,time_created,json_remove(data,'$.contextSnapshot') data FROM message WHERE session_id="+quoted,
-    "UNION ALL SELECT 'part',id,message_id,sequence IS NULL,sequence,time_created,CASE WHEN json_extract(data,'$.type')='text' THEN data ELSE json_object('type',json_extract(data,'$.type'),'synthetic',json_extract(data,'$.synthetic'),'metadata',json_extract(data,'$.metadata')) END FROM part WHERE session_id="+quoted,
-    "ORDER BY kind,message_id,missing_seq,sequence,time_created,id; COMMIT;"
-  ].join("\n");
-  const rows=await queryJson(dbPath,sql,sqliteBin);
+  // 单次查询取齐两表。消息按时间排序，部件在所属消息内按 sequence 排序
+  //（ID 是随机串，不能当顺序）。同一连接内用事务保证两次读取一致。
+  const db=readOnly(dbPath);
+  db.exec("BEGIN");
+  try {
+    const rows=db.prepare(`
+      SELECT 'message' kind,id,'' message_id,sequence IS NULL missing_seq,sequence,time_created,json_remove(data,'$.contextSnapshot') data FROM message WHERE session_id=?
+      UNION ALL SELECT 'part',id,message_id,sequence IS NULL,sequence,time_created,CASE WHEN json_extract(data,'$.type')='text' THEN data ELSE json_object('type',json_extract(data,'$.type'),'synthetic',json_extract(data,'$.synthetic'),'metadata',json_extract(data,'$.metadata')) END FROM part WHERE session_id=?
+      ORDER BY kind,message_id,missing_seq,sequence,time_created,id
+    `).all(sessionId,sessionId);
+    db.exec("COMMIT");
+    return buildHistory(session,rows,sessionId);
+  }catch(error) {
+    try {db.exec("ROLLBACK");}catch {}
+    throw error;
+  }
+}
+
+function buildHistory(session,rows,sessionId) {
   const parts=new Map();
   for(const row of rows.filter(r=>r.kind==="part")) {
     const list=parts.get(row.message_id)??[];

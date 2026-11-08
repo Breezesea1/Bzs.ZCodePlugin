@@ -13,11 +13,11 @@ export function createBackend({event,config,saveState,prompt,generate=generateTe
   if(!SESSION_ID_RE.test(sessionId??""))throw new Error("输入需要有效 session_id");
   // 会话归属工作区以库中记录为权威；索引行次选，事件 payload 最后兜底
   let resolvedWorkspace=null;
-  const loadIndexRowForSession=()=>loadIndexRow({dbPath:config.indexDb,sessionId,sqliteBin:config.sqliteBin});
+  const loadIndexRowForSession=()=>loadIndexRow({dbPath:config.indexDb,sessionId});
   const resolveWorkspace=async()=>{
     if(resolvedWorkspace)return resolvedWorkspace;
     try {
-      const history=await readHistory({dbPath:config.sessionDb,sqliteBin:config.sqliteBin,sessionId});
+      const history=await readHistory({dbPath:config.sessionDb,sessionId});
       if(history.session.directory){resolvedWorkspace=history.session.directory;return resolvedWorkspace;}
     }catch {}
     const row=await loadIndexRowForSession();
@@ -33,7 +33,7 @@ export function createBackend({event,config,saveState,prompt,generate=generateTe
       const ws=await resolveWorkspace();
       const row=await loadIndexRowForSession();
       // 新会话首轮索引行可能尚未写入：session.directory 已足以定位，不因缺行失败
-      const history=await readHistory({dbPath:config.sessionDb,sqliteBin:config.sqliteBin,sessionId,workspacePath:ws});
+      const history=await readHistory({dbPath:config.sessionDb,sessionId,workspacePath:ws});
       const snapshot=conversationSnapshot(history);
       return {
         ...snapshot,
@@ -47,7 +47,7 @@ export function createBackend({event,config,saveState,prompt,generate=generateTe
     },
     async sessionExists() {
       // 存在性校验：查询异常不吞，避免把"查不了"静默当"不存在"
-      if(await sessionExistsInSessionDb({dbPath:config.sessionDb,sessionId,sqliteBin:config.sqliteBin}))return true;
+      if(await sessionExistsInSessionDb({dbPath:config.sessionDb,sessionId}))return true;
       return (await loadIndexRowForSession())!==null;
     },
     async models() {

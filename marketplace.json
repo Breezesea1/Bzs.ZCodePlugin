@@ -1,15 +1,19 @@
 {
   "name": "dev-bzs-zcodeplugin",
   "displayName": "Bzs ZCode Plugin Dev",
-  "displayName_i18n": { "zh-CN": "Bzs ZCode 插件开发市场" },
+  "displayName_i18n": {
+    "zh-CN": "Bzs ZCode 插件开发市场"
+  },
   "plugins": [
     {
       "name": "bzs-zcode-session-title",
       "source": "./plugins/bzs-zcode-session-title",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "description": "Auto-summarize each conversation turn and rename the session title, with configurable model and reasoning level.",
       "displayName": "Bzs Session Title",
-      "displayName_i18n": { "zh-CN": "会话自动总结命名" },
+      "displayName_i18n": {
+        "zh-CN": "会话自动总结命名"
+      },
       "description_i18n": {
         "zh-CN": "会话自动总结与重命名：每轮对话结束后总结会话内容并更新标题，支持配置模型与思考档位"
       },

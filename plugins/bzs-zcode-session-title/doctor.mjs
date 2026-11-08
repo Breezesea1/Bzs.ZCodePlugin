@@ -12,7 +12,7 @@ export async function runDoctor({backend,event,config}) {
   check("selection",!!config.selection,config.selection?`${config.selection.providerId} / ${config.selection.modelId} / ${config.selection.options?.reasoningLevel}`:"未配置模型选择");
   // 2. 会话定位（SQLite）
   try {
-    const history=await readHistory({dbPath:config.sessionDb,sqliteBin:config.sqliteBin,sessionId:event.session_id,workspacePath:event.workspace_path??event.cwd});
+    const history=await readHistory({dbPath:config.sessionDb,sessionId:event.session_id,workspacePath:event.workspace_path??event.cwd});
     const snapshot=await backend.read();
     check("history",true,`会话标题「${history.session.title}」，有效对话轮 ${snapshot.turns.length}，指纹 ${snapshot.fingerprint.slice(0,12)}…`);
   } catch(error) {

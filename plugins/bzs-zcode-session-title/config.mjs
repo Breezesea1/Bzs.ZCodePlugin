@@ -14,7 +14,6 @@ export const CONFIG_DEFAULTS={
   titlePolicyDirectory:join(homedir(),".zcode","bzs-zcode-session-title","title-policies"),
   timeoutMs:120000,
   maxOutputTokens:2048,
-  sqliteBin:"sqlite3",
   rename:{
     enabled:true,
     maxTitleChars:48,
@@ -65,10 +64,11 @@ export async function loadConfig(configPath,{env=process.env,allowDisabled=false
   }
   if(typeof supplied!=="object"||supplied===null||Array.isArray(supplied))return {error:"invalid_config",message:"配置必须是 JSON 对象"};
   if(supplied.enabled===false&&!allowDisabled)return {error:"disabled",message:"自动命名已暂停"};
+  // 0.3.1 起 sqlite3 CLI 由 node:sqlite 内嵌取代：旧配置里的 sqliteBin 字段读入后丢弃
+  const {sqliteBin:_deprecated,...knownSupplied}=supplied;
   const config={
     ...CONFIG_DEFAULTS,
-    ...supplied,
-    sqliteBin:supplied.sqliteBin??env.SQLITE_BIN??CONFIG_DEFAULTS.sqliteBin,
+    ...knownSupplied,
     rename:{...CONFIG_DEFAULTS.rename,...(supplied.rename??"")}
   };
   const selectionError=validateSelection(config.selection);

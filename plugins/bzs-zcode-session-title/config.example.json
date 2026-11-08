@@ -6,7 +6,6 @@
       "reasoningLevel": "low"
     }
   },
-  "sqliteBin": "sqlite3",
   "dataDir": "state",
   "timeoutMs": 120000,
   "maxOutputTokens": 2048,
