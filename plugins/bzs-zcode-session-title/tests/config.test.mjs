@@ -80,7 +80,7 @@ test("loadConfig：SQLITE_BIN 环境变量作为 sqliteBin 兜底",async()=>{
 test("validateSelection：对照目录视图校验模型与档位",()=>{
   const view={providers:[{providerId:"account:test",models:[{modelId:"GLM-Test",config:{optionSpecs:{reasoningLevel:{values:["low","medium"]}}}}]}]};
   assert.equal(validateSelection({providerId:"account:test",modelId:"GLM-Test",options:{reasoningLevel:"medium"}},view),null);
-  assert.match(validateSelection({providerId:"account:test",modelId:"Nope",options:{reasoningLevel:"low"}},view),/可用目录/);
+  assert.match(validateSelection({providerId:"account:test",modelId:"Nope",options:{reasoningLevel:"low"}},view),/不在直连目录中/);
   assert.match(validateSelection({providerId:"account:test",modelId:"GLM-Test",options:{reasoningLevel:"xhigh"}},view),/档位不可用/);
 });
 

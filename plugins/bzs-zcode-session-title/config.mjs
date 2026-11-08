@@ -11,8 +11,7 @@ const REASONING_LEVELS=new Set(["minimal","low","medium","high","xhigh"]);
 export const CONFIG_DEFAULTS={
   sessionDb:join(homedir(),".zcode","cli","db","db.sqlite"),
   indexDb:join(homedir(),".zcode","v2","tasks-index.sqlite"),
-  gatewayConfigPath:join(homedir(),".zcode","tools","suian-zcode-gateway","config.json"),
-  titlePolicyDirectory:join(homedir(),".zcode","tools","suian-zcode-common","session-titles"),
+  titlePolicyDirectory:join(homedir(),".zcode","bzs-zcode-session-title","title-policies"),
   timeoutMs:120000,
   maxOutputTokens:2048,
   sqliteBin:"sqlite3",
@@ -46,7 +45,7 @@ export function validateSelection(selection,view) {
   if(!view)return null;
   const provider=(view.providers??[]).find(p=>p.providerId===providerId);
   const model=provider?.models?.find(m=>m.modelId===modelId);
-  if(!model)return "指定模型不在原 Host 的可用目录中";
+  if(!model)return "指定模型不在直连目录中（providerId 需含 bigmodel 或 zai）";
   const values=model.config?.optionSpecs?.reasoningLevel?.values;
   if(Array.isArray(values)&&!values.includes(level))return "指定思考档位不可用";
   return null;

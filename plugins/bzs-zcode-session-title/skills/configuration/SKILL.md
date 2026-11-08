@@ -11,14 +11,14 @@ description: 配置 ZCode 自动总结命名的模型、思考档位、标题格
 
 ```jsonc
 {
-  // 模型选择（必填，来自 models 命令的实际目录）
+  // 模型选择（必填；providerId 需含 bigmodel/magpie/glm 或 zai，模型来自 models 命令目录）
   "selection": {
-    "providerId": "account:bigmodel-individual-coding-plan",
+    "providerId": "magpie",
     "modelId": "GLM-5.3-Flash",
     "options": { "reasoningLevel": "low" }  // minimal/low/medium/high/xhigh 中的可用档位
   },
   "enabled": true,            // 总开关；false 时 Stop hook 静默跳过
-  "timeoutMs": 120000,        // 1000–300000，单次网关 RPC 超时
+  "timeoutMs": 120000,        // 1000–300000，单次模型调用超时
   "maxOutputTokens": 2048,    // 256–16384，总结输出上限
   "sqliteBin": "sqlite3",     // 或 SQLITE_BIN 环境变量；建议绝对路径
   "rename": {
@@ -30,7 +30,7 @@ description: 配置 ZCode 自动总结命名的模型、思考档位、标题格
 }
 ```
 
-`selection.providerId` / `modelId` / `reasoningLevel` 必须来自真实目录，不接受凭空选择：修改模型前先运行 `node "{{plugin_root}}/cli.mjs" models --config "{{ZCODE_PLUGIN_DATA}}/config.json"`（stdin `{}`）核对该 provider 下模型与档位确实存在。
+`selection.providerId` / `modelId` / `reasoningLevel` 必须来自真实目录，不接受凭空选择：修改模型前先运行 `node "{{plugin_root}}/cli.mjs" models --config "{{ZCODE_PLUGIN_DATA}}/config.json"`（stdin `{}`）核对模型与档位确实存在。直连模式下 providerId 只需推断家族（含 `bigmodel`/`magpie`/`glm` 走 bigmodel 端点，含 `zai` 走 z.ai 端点）。
 
 ## 查询与排障
 

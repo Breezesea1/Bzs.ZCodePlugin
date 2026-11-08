@@ -121,14 +121,15 @@ test("CLI policy：会话不存在时报错",async()=>{
   await cleanup();
 });
 
-test("CLI models：stdin 空对象不再要求 session_id",async()=>{
+test("CLI models：stdin 空对象直接返回静态目录",async()=>{
   const {dataPath,cleanup}=await makeSandbox();
   const configPath=join(dataPath,"config.json");
   await writeConfig(configPath,{selection});
   const {code,out}=await runCli(["models","--config",configPath],{});
-  assert.equal(code,1); // 网关未配置时走 failed，但绝不能是 session_id 校验错
-  const failure=JSON.parse(out);
-  assert.doesNotMatch(failure.error,/session_id/);
+  assert.equal(code,0);
+  const result=JSON.parse(out);
+  assert.equal(result.status,"models");
+  assert.ok(result.providers.length>0);
   await cleanup();
 });
 

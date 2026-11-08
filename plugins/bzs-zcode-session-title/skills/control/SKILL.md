@@ -18,6 +18,6 @@ node "{{plugin_root}}/cli.mjs" policy --config "{{ZCODE_PLUGIN_DATA}}/config.jso
 规则：
 
 - 暂停/恢复只改 `enabled`，保留模型选择等其余配置；读写复核后报告结果。
-- 标题策略文件与 suian-zcode-title 插件共享（`~/.zcode/tools/suian-zcode-common/session-titles/<session>.json`），两个插件互认锁定，不会互相抢改名。
+- 标题策略文件保存在 `~/.zcode/bzs-zcode-session-title/title-policies/<session>.json`；界面手动改名会被宿主 `title_overridden` 位保护，与本策略文件双保险，不会互相抢改名。
 - lock 前先确认目标会话存在（CLI 自动校验）；解锁后下一轮 Stop 恢复自动命名。
 - 本技能不提供"手动改成某标题"的能力：手动改标题请直接在 ZCode 界面操作，插件检测到非宿主改名会自动锁定不再覆盖；改完后如需恢复自动命名，用 unlock。

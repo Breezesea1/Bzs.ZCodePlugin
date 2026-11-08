@@ -31,10 +31,18 @@ export async function sessionExistsInSessionDb({dbPath,sessionId,sqliteBin}) {
   return (await queryJson(dbPath,`SELECT 1 AS ok FROM session WHERE id='${sessionId}' LIMIT 1;`,sqliteBin)).length>0;
 }
 
-// 索引行每次现查：rename 前后 title/archived 会变化，不能缓存
+// 索引行每次现查：rename 前后 title/archived 会变化，不能缓存。
+// cli_title 是外部进程的写入位：宿主镜像 title 列有延迟窗口，读回校验须读自己的写入。
 export async function loadIndexRow({dbPath,sessionId,sqliteBin}) {
-  try {return (await queryJson(dbPath,`SELECT task_id,workspace_path,title,archived,deleted,task_status FROM tasks WHERE task_id='${sessionId}';`,sqliteBin))[0]??null;}
+  try {return (await queryJson(dbPath,`SELECT task_id,workspace_path,title,title_overridden AS titleOverridden,cli_title AS cliTitle,cli_title_source AS cliTitleSource,archived,deleted,task_status AS taskStatus FROM tasks WHERE task_id='${sessionId}';`,sqliteBin))[0]??null;}
   catch {return null;}
+}
+
+// UI 同款标题解析：title_overridden=1（用户手动改名）以 title 为准，否则用 cli_title 写入位
+export function displayTitleOf(row) {
+  if(!row)return null;
+  if(row.titleOverridden===1||row.titleOverridden===true)return row.title;
+  return row.cliTitle??row.title;
 }
 
 export async function readHistory({dbPath,sessionId,workspacePath,sqliteBin="sqlite3"}) {

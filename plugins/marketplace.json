@@ -6,7 +6,7 @@
     {
       "name": "bzs-zcode-session-title",
       "source": "./bzs-zcode-session-title",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "description": "Auto-summarize each conversation turn and rename the session title, with configurable model and reasoning level.",
       "displayName": "Bzs Session Title",
       "displayName_i18n": { "zh-CN": "会话自动总结命名" },

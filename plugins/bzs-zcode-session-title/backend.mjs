@@ -1,14 +1,16 @@
-// 原宿主通道适配层：写操作（改名）与模型调用统一经公共网关 RPC，
-// 会话数据读取统一走 history.mjs 持久层；本模块不含业务状态机。
-import {connectHost,withGatewayRetry} from "./gateway/connect.mjs";
-import {readHistory,conversationSnapshot,sessionExistsInSessionDb,loadIndexRow,SESSION_ID_RE} from "./history.mjs";
+// 直连适配层：会话数据读取走 history.mjs（SQLite 只读），改名直写任务索引（taskstore.mjs），
+// 模型总结直调 Anthropic 兼容端点（modelcall.mjs）。本模块不含业务状态机。
+import {readHistory,conversationSnapshot,sessionExistsInSessionDb,loadIndexRow,displayTitleOf,SESSION_ID_RE} from "./history.mjs";
 import {validateSelection} from "./config.mjs";
 import {readTitlePolicy} from "./vendor/title-policy.mjs";
+import * as taskstore from "./taskstore.mjs";
+import {generateText,modelCatalog} from "./modelcall.mjs";
+import {homedir} from "node:os";
+import {join} from "node:path";
 
-export function createBackend({event,config,saveState,prompt,connect=connectHost,retryDelaysMs=[10000,30000]}) {
+export function createBackend({event,config,saveState,prompt,generate=generateText,env=process.env}) {
   const sessionId=event.session_id;
   if(!SESSION_ID_RE.test(sessionId??""))throw new Error("输入需要有效 session_id");
-  let remote;
   // 会话归属工作区以库中记录为权威；索引行次选，事件 payload 最后兜底
   let resolvedWorkspace=null;
   const loadIndexRowForSession=()=>loadIndexRow({dbPath:config.indexDb,sessionId,sqliteBin:config.sqliteBin});
@@ -25,26 +27,7 @@ export function createBackend({event,config,saveState,prompt,connect=connectHost
     resolvedWorkspace=fallback;
     return resolvedWorkspace;
   };
-  const attach=async()=>{
-    if(!remote) {
-      remote=await connect({
-        workspacePath:await resolveWorkspace(),sessionId,
-        gatewayConfigPath:config.gatewayConfigPath,
-        timeoutMs:config.timeoutMs,
-        handshakeTimeoutMs:Math.min(config.timeoutMs,8000)
-      });
-    }
-    return remote;
-  };
-  // 网关忙时首个大调用可能被瞬断（gateway_rpc_protocol_error）：fault 已 reject 的
-  // 连接无法复用，丢弃后由下次 attach 重连；退避策略与 connect.mjs 共用同一份定义。
-  const call=(channel,method,args=[])=>withGatewayRetry(async()=>{
-    try {return await (await attach()).call(channel,method,args);}
-    catch(error) {
-      if(error.reasonCode==="gateway_rpc_protocol_error") {remote?.close();remote=null;}
-      throw error;
-    }
-  },{retryDelaysMs});
+  const credentialsPath=env.BZS_TITLE_CREDENTIALS??join(homedir(),".zcode","v2","credentials.json");
   return {
     async read() {
       const ws=await resolveWorkspace();
@@ -52,20 +35,14 @@ export function createBackend({event,config,saveState,prompt,connect=connectHost
       // 新会话首轮索引行可能尚未写入：session.directory 已足以定位，不因缺行失败
       const history=await readHistory({dbPath:config.sessionDb,sqliteBin:config.sqliteBin,sessionId,workspacePath:ws});
       const snapshot=conversationSnapshot(history);
-      if(remote) {
-        // 已附着时校验宿主任务元与持久化标题一致，防漂移改名
-        const meta=await call("zcode-task","getTaskMeta",[{taskId:sessionId,workspacePath:ws}]);
-        if(meta.taskId!==sessionId||meta.workspacePath!==ws||meta.title!==history.session.title) {
-          const mismatch=new Error("原宿主与持久化标题不一致");mismatch.reasonCode="host_title_mismatch";throw mismatch;
-        }
-      }
       return {
         ...snapshot,
         turnCount:snapshot.turns.length,
-        title:history.session.title,
-        titleSource:history.session.titleSource??null,
+        // 标题按 UI 同款解析：cli_title 是外部写入位，宿主镜像 title 列有延迟窗口
+        title:displayTitleOf(row)??history.session.title,
+        titleSource:row?.cliTitleSource??history.session.titleSource??null,
         titlePolicy:await readTitlePolicy({sessionId,directory:config.titlePolicyDirectory}),
-        archived:!!row?.archived,deleted:!!row?.deleted,running:row?.task_status==="running"
+        archived:!!row?.archived,deleted:!!row?.deleted,running:row?.taskStatus==="running"
       };
     },
     async sessionExists() {
@@ -73,26 +50,33 @@ export function createBackend({event,config,saveState,prompt,connect=connectHost
       if(await sessionExistsInSessionDb({dbPath:config.sessionDb,sessionId,sqliteBin:config.sqliteBin}))return true;
       return (await loadIndexRowForSession())!==null;
     },
-    async models() {return call("model-selection","getView",[]);},
+    async models() {
+      // 直连模式下没有宿主目录查询：返回本地静态目录供 validateSelection 校验
+      return modelCatalog();
+    },
     async generate(context,selection) {
-      const view=await call("model-selection","getView",[]);
-      const selectionError=validateSelection(selection,view);
+      const catalog=await this.models();
+      // providerId 只用于家族推断（如 magpie→bigmodel），目录校验按家族名进行
+      const {resolveFamily}=await import("./modelcall.mjs");
+      let family;
+      try {family=resolveFamily(selection.providerId);}catch(error){throw new Error(error.message);}
+      const selectionError=validateSelection({...selection,providerId:family},catalog);
       if(selectionError)throw new Error(selectionError);
-      return call("zcode-agent","generateWorkspaceText",[{
-        workspacePath:await resolveWorkspace(),selection,
+      return generate({
+        selection,
         messages:[{role:"system",content:prompt},{role:"user",content:JSON.stringify(context)}],
-        tools:[],querySource:"session_title_external",
         maxOutputTokens:config.maxOutputTokens,
-        requestTimeoutMs:config.timeoutMs+10000
-      }]);
+        timeoutMs:config.timeoutMs,
+        credentialsPath,
+        env
+      });
     },
     async rename(title) {
       const ws=await resolveWorkspace();
-      const result=await call("zcode-task","renameTask",[{taskId:sessionId,workspacePath:ws,title}]);
-      if(result.taskId&&result.taskId!==sessionId)throw new Error("改名返回了不同会话");
-      if(result.title!==title)throw new Error("原宿主改名响应不一致");
+      const updated=taskstore.renameTask({dbPath:config.indexDb,sessionId,workspacePath:ws,title});
+      if(!updated)throw new Error("任务索引中没有目标会话行，改名未生效");
     },
     saveState,
-    close() {remote?.close();}
+    close() {taskstore.close();}
   };
 }

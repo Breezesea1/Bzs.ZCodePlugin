@@ -10,18 +10,18 @@
 
 标题统一为「类别 emoji + 对象｜核心目标」：对象在前（模块名、工具名或内容主题），目标在后（持续目标而非最后一句）。跟随对话语言，可以暂停，也可以固定某个会话的名称。
 
-## 工作方式
+## 工作方式（0.3.0 起直连，无网关）
 
 1. **Stop Hook 触发**：每轮对话结束（`Stop` 事件），宿主以后台方式派发命名 worker（`async:true`，不阻塞对话；由 `stop_hook_active` 跳过续跑轮防止重复）。
-2. **读取会话历史**：worker 直接读本机 SQLite 会话库（`~/.zcode/cli/db/db.sqlite`），按宿主同源的投影策略筛出真实用户输入与可见助手回复，应用回退记录，取最近 N 轮构造总结上下文。
-3. **模型总结**：通过公共网关（[suian-zcode-common](../suian-zcode-common/SKILL.md) 的 suian-zcode-gateway）调用你账号里**所选的模型与思考档位**，由模型决定 keep 或 rename。
-4. **安全改名**：改名前复查宿主任务元与漂移指纹，防止覆盖用户手动改名；改名经宿主 `renameTask` 完成，对话中不插入任何消息。
+2. **读取会话历史**：worker 直接只读本机 SQLite 会话库（`~/.zcode/cli/db/db.sqlite`），按宿主同源的投影策略筛出真实用户输入与可见助手回复，应用回退记录，取最近 N 轮构造总结上下文。
+3. **模型总结**：直接调用 Anthropic 兼容端点（bigmodel/zai 家族，零中间层）。凭据从 Desktop 凭据文件本地解密（AES-256-GCM），按宿主同款协议铸造短时项目 token（约 5 小时，自动临期重铸），计费走你的 coding plan。
+4. **安全改名**：改名直写任务索引（`~/.zcode/v2/tasks-index.sqlite`）的 `cli_title` 官方写入位——与宿主 CLI 会话同款协议，宿主自动镜像到 `title` 列。改名前复查漂移指纹与用户手动改名锁定（`title_overridden`/策略文件双保险），对话中不插入任何消息。
 
-插件**零 npm 依赖**：WebSocket（ws 8.22.0，MIT）与 RPC 协议编解码均已 vendor 进插件目录（见 `vendor/` 与许可文件），Node.js 20+ 与 sqlite3 CLI 即可运行。
+插件**零 npm 依赖、零外部服务**：不需要网关、不需要远控面板、不需要 API key 配置。仅要求 Node.js 22+（内置 `node:sqlite`）与 sqlite3 CLI（读会话库）。
 
 ## 安装
 
-通过本地插件市场安装后，让 Agent 按 [setup](./skills/setup/SKILL.md) 初始化：核验环境 → 配置网关连接 → 选择模型与档位 → doctor 体检 → 启用。桌面端需开启「移动端远程控制」面板（不需要手机扫码）。
+通过本地插件市场安装后，让 Agent 按 [setup](./skills/setup/SKILL.md) 初始化：核验环境 → 选择模型与档位 → doctor 体检 → 启用。
 
 ## 配置
 
@@ -29,10 +29,10 @@
 
 ```jsonc
 {
-  "selection": {                       // 总结模型（必填，来自 models 命令的实际目录）
+  "selection": {                       // 总结模型（必填；providerId 需含 bigmodel/magpie/glm 或 zai）
     "providerId": "magpie",
-    "modelId": "bzs/group/glm-5.3-flash",
-    "options": { "reasoningLevel": "low" }   // low / high / max …
+    "modelId": "GLM-5.3-Flash",
+    "options": { "reasoningLevel": "low" }   // minimal / low / medium / high
   },
   "enabled": true,
   "timeoutMs": 120000,
@@ -49,7 +49,7 @@
 ## 日常操作
 
 - **暂停 / 恢复**：[control](./skills/control/SKILL.md) 的 `disable` / `enable`。
-- **固定标题**：界面手动改名会被自动检测并锁定不再覆盖；`lock` / `unlock` 直接操作策略文件（与 suian-zcode-title 插件互认）。
+- **固定标题**：界面手动改名会被自动检测并锁定不再覆盖；`lock` / `unlock` 直接操作策略文件。
 - **排障**：[debug](./skills/debug/SKILL.md) 与 `doctor` / `probe` / `status` 命令；日志在数据目录 `state/` 下。
 
 ## 命令速查
@@ -65,9 +65,9 @@ node cli.mjs lock|unlock|policy --config ...                      # 标题固定
 
 ## 已验证范围
 
-- 单元测试 56 项全通过（标题校验、命名状态机、配置校验、SQLite 历史读取、hook 派发、CLI 集成、网关瞬断重试、prompt 渲染）。
-- 真实链路端到端验证：读取真实会话 → 模型总结（GLM-5.3-Flash / low）→ keep 路径与 rename 路径 → `renameTask` 落地会话库与任务索引双库。
+- 单元测试 56 项（标题校验、命名状态机、配置校验、SQLite 历史读取、hook 派发、CLI 集成、直连目录校验、prompt 渲染）。
+- 真实链路端到端验证（2026-11-08）：真实会话 9 轮 → 凭据解密与项目 token 铸造 → GLM-5.3-Flash 直调总结 → rename 落地任务索引 `cli_title` 位（宿主自动镜像）→ 次轮读回确认后 keep。`doctor` 五项检查全绿。
 - 指纹漂移护栏：会话在总结期间继续变化时正确返回 `stale_result` 而不覆盖。
-- 网关瞬断自愈：`gateway_rpc_protocol_error` 时自动断开重连并退避重试（10s / 30s）。
+- 用户手动改名保护：`title_overridden=1` 的行直写让位，策略文件锁定互为补充。
 
-**注意**：改名与模型调用依赖公共网关连接原 Desktop 窗口；目标会话所在工作区必须在该窗口打开，且 ZCode 3.16 在线模式下需要官方远控服务可达。离线模式下后台命名不可用（与官方移动端远控一致的约束）。
+**已知取舍**：改名写入后，已打开的任务列表依赖宿主下次刷新（窗口聚焦/列表重开）才显示新标题；列表数据本身实时读库，无数据不一致。

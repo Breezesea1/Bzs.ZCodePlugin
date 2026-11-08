@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
-const defaultDirectory = join(homedir(), '.zcode', 'tools', 'suian-zcode-common', 'session-titles');
+const defaultDirectory = join(homedir(), '.zcode', 'bzs-zcode-session-title', 'title-policies');
 function policyFile(directory, sessionId) {
   if (!/^sess(?:ion)?_[A-Za-z0-9_-]+$/.test(sessionId)) throw new Error('Invalid title policy sessionId');
   return join(directory, sessionId + '.json');
