@@ -19,6 +19,14 @@
 
 插件**零 npm 依赖、零外部服务**：不需要网关、不需要远控面板、不需要 API key 配置。仅要求 Node.js 22+（内置 `node:sqlite`）与 sqlite3 CLI（读会话库）。
 
+### 模型家族（0.3.2）
+
+直连支持三家族：**bigmodel**（magpie/GLM，铸 token）、**zai**（铸 token）、**minimax**（`MiniMax-M3.1-Flash` / `MiniMax-M3`，静态 API key，凭据名 `oauth:minimax:api_key`，用 `scripts/set-minimax-key.mjs` 写入）。
+
+### 关于 gateway/ 目录（实验性，勿启用）
+
+仓库内保留一份实验性网关代码（照抄 suian 方案：本地 WS 中继 Desktop↔官方 relay，借宿主 `model-selection.getView` 模型目录生成）。**默认不启用，也不建议启用**：安装器会写用户级环境变量把 Desktop 远控 relay 指向本地网关，若网关到官方上游的认证失败，**会连带弄坏 ZCode 手机远控**（2026-11-08 实测：上游 1006 → `relay-unavailable`）。`config.gateway.mode` 支持 `auto`(缺省)/`gateway`/`direct`；当前线上配置为 `direct`。
+
 ## 安装
 
 通过本地插件市场安装后，让 Agent 按 [setup](./skills/setup/SKILL.md) 初始化：核验环境 → 选择模型与档位 → doctor 体检 → 启用。
@@ -65,7 +73,7 @@ node cli.mjs lock|unlock|policy --config ...                      # 标题固定
 
 ## 已验证范围
 
-- 单元测试 56 项（标题校验、命名状态机、配置校验、SQLite 历史读取、hook 派发、CLI 集成、直连目录校验、prompt 渲染）。
+- 单元测试 66 项（标题校验、命名状态机、配置校验、SQLite 历史读取、hook 派发、CLI 集成、直连目录校验、prompt 渲染、模型家族与网关回落）。
 - 真实链路端到端验证（2026-11-08）：真实会话 9 轮 → 凭据解密与项目 token 铸造 → GLM-5.3-Flash 直调总结 → rename 落地任务索引 `cli_title` 位（宿主自动镜像）→ 次轮读回确认后 keep。`doctor` 五项检查全绿。
 - 指纹漂移护栏：会话在总结期间继续变化时正确返回 `stale_result` 而不覆盖。
 - 用户手动改名保护：`title_overridden=1` 的行直写让位，策略文件锁定互为补充。

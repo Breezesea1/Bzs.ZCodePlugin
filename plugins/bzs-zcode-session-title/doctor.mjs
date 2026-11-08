@@ -21,7 +21,7 @@ export async function runDoctor({backend,event,config}) {
   // 3. 任务索引（改名写入位）
   const indexOk=indexReachable(config.indexDb);
   check("task_index",indexOk,indexOk?"任务索引可读写（cli_title 写入位）":"任务索引不可达："+config.indexDb);
-  // 4. 凭据解密
+  // 4. 凭据解密（网关模式下宿主代管凭据，仍检查直连回落用凭据但不阻塞）
   let credentialsOk=false;
   try {
     const token=await loadLoginToken(join(homedir(),".zcode","v2","credentials.json"));
@@ -30,7 +30,23 @@ export async function runDoctor({backend,event,config}) {
   } catch(error) {
     check("credentials",false,`${error.reasonCode??"error"}: ${error.message}`);
   }
-  // 5. 模型目录
+  // 5. 网关（auto/gateway 模式下探测；direct 或未装时报告但不失败——auto 会回落直连）
+  const gatewayMode=config.gateway?.mode??"auto";
+  if(gatewayMode!=="direct") {
+    try {
+      const {probeHost}=await import("./gateway/gateway-client.mjs");
+      const probe=await probeHost({workspacePath:event.workspace_path??event.cwd,sessionId:event.session_id,timeoutMs:6000});
+      const reachable=probe.hostReachable===true&&probe.ok===true;
+      check("gateway",reachable,reachable
+        ?`网关可达且 Desktop 已配对（paired=${probe.paired}，本地客户端=${probe.localClients}）`
+        :`网关未就绪（${probe.reasonCode??"unknown"}）——${gatewayMode==="gateway"?"强制网关模式下为致命":"auto 模式将回落直连"}`);
+    } catch(error) {
+      check("gateway",false,`网关探测异常：${error.message}`);
+    }
+  } else {
+    check("gateway",true,"direct 模式：不使用网关");
+  }
+  // 6. 模型目录
   try {
     const view=await backend.models();
     const provider=(view.providers??[]).find(p=>p.providerId===resolveFamily(config.selection?.providerId));

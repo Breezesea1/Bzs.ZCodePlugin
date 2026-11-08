@@ -7,8 +7,16 @@ import {readFile} from "node:fs/promises";
 
 const FAMILIES={
   bigmodel:{origin:"https://bigmodel.cn",anthropicBase:"https://bigmodel.cn/api/anthropic",bearerAuth:false},
-  zai:{origin:"https://api.z.ai",anthropicBase:"https://api.z.ai/api/anthropic",bearerAuth:true}
+  zai:{origin:"https://api.z.ai",anthropicBase:"https://api.z.ai/api/anthropic",bearerAuth:true},
+  // MiniMax：官方 Anthropic 兼容端点，静态 Bearer API key（无铸 token 链）
+  minimax:{origin:"https://api.minimax.io",anthropicBase:"https://api.minimax.io/anthropic",bearerAuth:true,staticKey:true}
 };
+// MiniMax 家族：providerId → 目录 providerId 的映射（magpie 聚合承载方为 MiniMax-M3.1-Flash）
+export const MINIMAX_MODELS=[
+  {modelId:"MiniMax-M3.1-Flash",config:{optionSpecs:{reasoningLevel:{values:["low","medium","high"]}}}},
+  {modelId:"MiniMax-M3",config:{optionSpecs:{reasoningLevel:{values:["low","medium","high","xhigh"]}}}}
+];
+const MINIMAX_KEY_NAME="oauth:minimax:api_key";
 const CLIENT_VERSION="3.12.3";
 // token 在到期前 refreshBeforeMs 提前重铸，避免调用中途过期
 const REFRESH_BEFORE_MS=10*60*1000;
@@ -16,7 +24,8 @@ const REFRESH_BEFORE_MS=10*60*1000;
 // selection.providerId → 家族。与 Desktop 预设（bigmodel-api / account:bigmodel-*-coding-plan 等）同构。
 export function resolveFamily(providerId) {
   const id=String(providerId??"");
-  // magpie 是本地聚合 provider，承载方为 GLM（bigmodel 家族）
+  // magpie 是本地聚合 provider，承载方按模型 ID 区分：MiniMax-M* 走 minimax，其余为 GLM（bigmodel 家族）
+  if(id.includes("minimax")||id.includes("MiniMax"))return "minimax";
   if(id.includes("bigmodel")||id.includes("magpie")||id.includes("glm"))return "bigmodel";
   if(id.includes("zai"))return "zai";
   throw Object.assign(new Error(`无法从 providerId 推断模型家族：${providerId}`),{reasonCode:"provider_family_unknown"});
@@ -120,6 +129,11 @@ async function loadFamilyToken(credentialsPath,key,env) {
   return Buffer.concat([decipher.update(Buffer.from(data,"base64url")),decipher.final()]).toString("utf8").trim();
 }
 
+// minimax 家族的静态 API key：enc:v1 加密存于 credentials.json（与 OAuth 条目同套加密）
+async function loadMinimaxKey(credentialsPath,env) {
+  return loadFamilyToken(credentialsPath,MINIMAX_KEY_NAME,env);
+}
+
 // 进程内 token 缓存：worker 短命，但一次 run 可能调 2 次模型（invalid_keep_title 重试）
 let cached=null;
 export function resetTokenCache() {cached=null;}
@@ -129,19 +143,22 @@ export function resetTokenCache() {cached=null;}
 export function modelCatalog() {
   return {providers:Object.entries(FAMILIES).map(([family,endpoint])=>({
     providerId:family,
-    models:[
-      {modelId:"GLM-5.3-Flash",config:{optionSpecs:{reasoningLevel:{values:["minimal","low","medium","high"]}}}},
-      {modelId:"GLM-5.3",config:{optionSpecs:{reasoningLevel:{values:["minimal","low","medium","high","xhigh"]}}}},
-      {modelId:"GLM-4.7",config:{optionSpecs:{reasoningLevel:{values:["minimal","low","medium","high","xhigh"]}}}}
-    ],
+    models:family==="minimax"
+      ?MINIMAX_MODELS
+      :[
+        {modelId:"GLM-5.3-Flash",config:{optionSpecs:{reasoningLevel:{values:["minimal","low","medium","high"]}}}},
+        {modelId:"GLM-5.3",config:{optionSpecs:{reasoningLevel:{values:["minimal","low","medium","high","xhigh"]}}}},
+        {modelId:"GLM-4.7",config:{optionSpecs:{reasoningLevel:{values:["minimal","low","medium","high","xhigh"]}}}}
+      ],
     anthropicBase:endpoint.anthropicBase
   }))};
 }
 
 export async function resolveAccessToken({credentialsPath,env=process.env,now=Date.now,providerId}={}) {
+  const family=resolveFamily(providerId);
+  if(family==="minimax")return loadMinimaxKey(credentialsPath,env);
   if(cached&&now()<cached.expiresAt-REFRESH_BEFORE_MS)return cached.token;
   const loginToken=await loadLoginToken(credentialsPath,env);
-  const family=resolveFamily(providerId);
   const minted=await mintProjectToken({loginToken,family,credentialsPath,env,now});
   cached={token:minted.token,expiresAt:minted.expiresAt};
   return cached.token;
@@ -153,12 +170,25 @@ export async function generateText({selection,messages,maxOutputTokens,timeoutMs
   const endpoint=FAMILIES[family];
   const token=env.BZS_TITLE_TEST_TOKEN??await resolveAccessToken({credentialsPath,env,now,providerId:selection.providerId});
   const reasoning=selection.options?.reasoningLevel;
-  // thinking 档位下思考与 text 共享 max_tokens，GLM 实际思考可达 3-4k tokens；
-  // 标题 JSON 本身很小，请求时按需抬高上限避免 text 块被思考挤没（计费按实际用量）。
-  const budget=reasoning&&reasoning!=="minimal"
-    ?{max_tokens:Math.max(maxOutputTokens,8192),thinking:{type:"enabled",budget_tokens:4096}}
-    :{max_tokens:maxOutputTokens};
-  const body={model:selection.modelId,messages,...budget};
+  let body;
+  if(family==="minimax") {
+    // MiniMax M3.1-Flash 始终思考（effort 缺省 max），思考与 text 共享 max_tokens，
+    // 与 GLM 同款抬顶避免 text 块被挤没；effort 映射自 selection 档位（档位名一致，xhigh→xhigh）。
+    const effortMap={minimal:"low",low:"low",medium:"medium",high:"high",xhigh:"xhigh"};
+    body={
+      model:selection.modelId,
+      messages,
+      max_tokens:Math.max(maxOutputTokens,8192),
+      output_config:{effort:effortMap[reasoning]??"medium"}
+    };
+  } else {
+    // thinking 档位下思考与 text 共享 max_tokens，GLM 实际思考可达 3-4k tokens；
+    // 标题 JSON 本身很小，请求时按需抬高上限避免 text 块被思考挤没（计费按实际用量）。
+    const budget=reasoning&&reasoning!=="minimal"
+      ?{max_tokens:Math.max(maxOutputTokens,8192),thinking:{type:"enabled",budget_tokens:4096}}
+      :{max_tokens:maxOutputTokens};
+    body={model:selection.modelId,messages,...budget};
+  }
   let response;
   try {
     response=await fetchImpl(`${endpoint.anthropicBase}/v1/messages`,{

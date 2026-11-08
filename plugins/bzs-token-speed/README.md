@@ -1,6 +1,6 @@
 # bzs-token-speed
 
-在 ZCode 输入框工具栏内联显示当前会话的 token 解码速度（tok/s）与 40 秒走势线。另附 Matrix 风格实时仪表盘与 4 个 MCP 查询工具。
+在 ZCode 输入框工具栏内联显示当前会话的 token 解码速度（tok/s）与 40 秒走势线。附 3 个 MCP 查询工具。
 
 ## 架构
 
@@ -21,7 +21,7 @@ scripts/
   install.mjs     注入芯片到 app.asar（自动备份，幂等）
   uninstall.mjs   还原（优先用备份还原，逐字节一致）
   status.mjs      查看注入状态与后端可达性
-ui/dashboard.html Matrix 风格仪表盘（自包含）
+
 skills/token-speed/SKILL.md  使用技能
 ```
 
@@ -66,4 +66,4 @@ ZCode 没有官方的底栏/statusline 扩展点（hook 事件枚举里没有 UI
 
 - 多窗口同时活跃时，芯片显示"目录 + 最近模型流量"推断出的冠军会话，tooltip 有会话号可核对。
 - ZCode 升级会重写 app.asar，需重跑 install.mjs（升级后先查 `PRAGMA table_info(model_usage)` 列名是否变化：`first_token_at/completed_at/output_tokens`）。
-- 若未来版本开启 asar 完整性校验 fuse，内联芯片方案失效，但 MCP 工具与仪表盘不受影响。
+- 若未来版本开启 asar 完整性校验 fuse，内联芯片方案失效，但 MCP 工具不受影响。

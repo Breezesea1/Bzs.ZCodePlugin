@@ -2,7 +2,7 @@
 // shipping a dependency tree into the plugin cache. Tools are thin wrappers
 // over the service layer; all formatting lives beside the tool definitions.
 import { pathToFileURL } from "node:url";
-import { startHttpHost, httpBaseUrl } from "./http.mjs";
+import { startHttpHost } from "./http.mjs";
 import {
   currentSpeedSnapshot,
   sessionSpeedSnapshot,
@@ -73,25 +73,6 @@ function speedDetail(args) {
   return text(JSON.stringify(snap, null, 2));
 }
 
-async function dashboardTool(args) {
-  const snap = currentSpeedSnapshot(resolveArgs(args));
-  if (!snap.session.id) {
-    return text("未找到活跃会话：数据库中没有 30 分钟内有活动的交互式会话。", true);
-  }
-  await startHttpHost();
-  const url = `${httpBaseUrl()}/`;
-  return text(
-    [
-      "Matrix 仪表盘已就绪。",
-      "",
-      `▸ 打开链接：${url}`,
-      "",
-      "页面特性：绿色数字雨背景、CRT 扫描线、实时 tok/s 折线与速度仪表、TTFT / 缓存命中 / Token 用量面板，1 秒自动采样。",
-      `监控会话：${snap.session.id}`,
-    ].join("\n")
-  );
-}
-
 function boardText() {
   const sessions = activeSessions({});
   return text(
@@ -136,18 +117,6 @@ const TOOLS = [
       },
     },
     run: speedDetail,
-  },
-  {
-    name: "token_speed_dashboard",
-    description:
-      "启动黑客帝国（Matrix）风格实时 token 速度监控仪表盘（本地网页：数字雨、CRT 扫描线、实时速度图表），返回可直接打开的 URL。服务常驻直到进程退出。",
-    inputSchema: {
-      type: "object",
-      properties: {
-        session_id: { type: "string", description: "可选：目标会话 ID，缺省自动识别" },
-      },
-    },
-    run: dashboardTool,
   },
   {
     name: "token_speed_board",

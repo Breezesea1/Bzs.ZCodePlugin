@@ -44,7 +44,7 @@ export function validateSelection(selection,view) {
   if(!view)return null;
   const provider=(view.providers??[]).find(p=>p.providerId===providerId);
   const model=provider?.models?.find(m=>m.modelId===modelId);
-  if(!model)return "指定模型不在直连目录中（providerId 需含 bigmodel 或 zai）";
+  if(!model)return "指定模型不在直连目录中（providerId 需含 bigmodel/zai/minimax 或对应家族名）";
   const values=model.config?.optionSpecs?.reasoningLevel?.values;
   if(Array.isArray(values)&&!values.includes(level))return "指定思考档位不可用";
   return null;
@@ -73,6 +73,11 @@ export async function loadConfig(configPath,{env=process.env,allowDisabled=false
   };
   const selectionError=validateSelection(config.selection);
   if(selectionError)return {error:"selection_invalid",message:selectionError};
+  // 网关模式：auto（缺省）= 有网关走宿主模型，否则直连；gateway = 强制网关，不可达即失败；
+  // direct = 禁用网关路径。仅校验取值，可达性由 backend 运行时探测。
+  const gatewayMode=config.gateway?.mode??"auto";
+  if(!["auto","gateway","direct"].includes(gatewayMode))return {error:"invalid_config",message:"gateway.mode 应为 auto/gateway/direct"};
+  config.gateway={...config.gateway,mode:gatewayMode};
   if(!Number.isInteger(config.timeoutMs)||config.timeoutMs<1000||config.timeoutMs>300000)return {error:"invalid_config",message:"timeoutMs 应在 1000–300000 范围内"};
   if(!Number.isInteger(config.maxOutputTokens)||config.maxOutputTokens<256||config.maxOutputTokens>16384)return {error:"invalid_config",message:"maxOutputTokens 应在 256–16384 范围内"};
   if(config.rename.maxTitleChars<10||config.rename.maxTitleChars>96)return {error:"invalid_config",message:"rename.maxTitleChars 应在 10–96 范围内"};

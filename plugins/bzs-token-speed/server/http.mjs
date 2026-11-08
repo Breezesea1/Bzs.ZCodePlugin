@@ -1,9 +1,8 @@
-// Loopback HTTP host: the data source for the composer chip and the host of
-// the optional dashboard page. Started once when the MCP server boots so the
-// chip has a stable endpoint for its whole lifetime.
+// Loopback HTTP host: the data source for the composer chip. Started once
+// when the MCP server boots so the chip has a stable endpoint for its whole
+// lifetime.
 import { createServer } from "node:http";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -14,7 +13,6 @@ import {
 } from "../lib/service.mjs";
 
 const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const UI_DIR = join(PLUGIN_ROOT, "ui");
 const HOST = "127.0.0.1";
 // Preferred port: fixed so the endpoint survives ZCode restarts without a
 // re-injection. When taken, the OS assigns a random one and the discovery
@@ -41,13 +39,6 @@ function sendJson(res, payload) {
 async function handleRequest(req, res) {
   const url = new URL(req.url, `http://${HOST}:${port}`);
   switch (url.pathname) {
-    case "/":
-    case "/index.html": {
-      const html = await readFile(join(UI_DIR, "dashboard.html"), "utf8");
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(html);
-      return;
-    }
     case "/api/snapshot": {
       // Explicit session wins; otherwise resolve by the caller-provided dir,
       // falling back to this process's own project dir (the MCP host session).
