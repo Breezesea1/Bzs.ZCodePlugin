@@ -13,6 +13,20 @@ test("构造：无效 session_id 直接拒绝",()=>{
   assert.throws(()=>createBackend({event:{session_id:"bad"},config,prompt:"p"}),/session_id/);
 });
 
+test("generate：passthrough 选择只验家族覆盖，允许目录外的宿主裸模型名",async()=>{
+  let called=0;
+  const backend=createBackend({
+    event,config,prompt:"p",
+    generate:async()=>{called++;return{text:"host"};},
+    env:{}
+  });
+  // 模型名不在 fixed 候选目录内（glm-5.3-flash），靠显式 passthrough 标记放行
+  const result=await backend.generate({},{providerId:"bigmodel",modelId:"glm-5.3-flash",options:{reasoningLevel:"low"},passthrough:true});
+  assert.equal(result.text,"host");
+  assert.equal(called,1);
+  backend.close();
+});
+
 test("generate：目录校验不过时直接拒绝，不发起模型调用",async()=>{
   let called=0;
   const backend=createBackend({
@@ -27,26 +41,10 @@ test("generate：目录校验不过时直接拒绝，不发起模型调用",asyn
   assert.equal(called,0);
 });
 
-test("generate：auto 模式网关不可达时回落直连（generate 被调）",async()=>{
+test("generate：fixed 模式直接直连",async()=>{
   let called=0;
-  const autoConfig={...config,gateway:{mode:"auto"}};
   const backend=createBackend({
-    event,config:autoConfig,prompt:"p",
-    generate:async(args)=>{called++;return{text:"fallback"};},
-    env:{}
-  });
-  // 无网关运行：connectHost 读不到 config.json → 抛 gateway_not_configured → 回落
-  const result=await backend.generate({},{providerId:"bigmodel",modelId:"GLM-5.3-Flash",options:{reasoningLevel:"low"}});
-  assert.equal(result.text,"fallback");
-  assert.equal(called,1);
-  backend.close();
-});
-
-test("generate：direct 模式不走网关，直接直连",async()=>{
-  let called=0;
-  const directConfig={...config,gateway:{mode:"direct"}};
-  const backend=createBackend({
-    event,config:directConfig,prompt:"p",
+    event,config,prompt:"p",
     generate:async()=>{called++;return{text:"direct"};},
     env:{}
   });
@@ -56,17 +54,17 @@ test("generate：direct 模式不走网关，直接直连",async()=>{
   backend.close();
 });
 
-test("generate：gateway 强制模式网关不可达时抛错（不回落）",async()=>{
-  const gwConfig={...config,gateway:{mode:"gateway"}};
+test("generate：旧配置残留 gateway 字段不影响直连（0.4.0 起忽略）",async()=>{
+  let called=0;
+  const legacyConfig={...config,gateway:{mode:"auto"}};
   const backend=createBackend({
-    event,config:gwConfig,prompt:"p",
-    generate:async()=>{throw new Error("不应走到直连");},
+    event,config:legacyConfig,prompt:"p",
+    generate:async()=>{called++;return{text:"legacy-ok"};},
     env:{}
   });
-  await assert.rejects(
-    ()=>backend.generate({},{providerId:"bigmodel",modelId:"GLM-5.3-Flash",options:{reasoningLevel:"low"}}),
-    /Desktop|网关/
-  );
+  const result=await backend.generate({},{providerId:"bigmodel",modelId:"GLM-5.3-Flash",options:{reasoningLevel:"low"}});
+  assert.equal(result.text,"legacy-ok");
+  assert.equal(called,1);
   backend.close();
 });
 

@@ -19,8 +19,14 @@ export async function loadPrompt(pluginRoot,config) {
 
 async function commandRun({backend,event,config,apply,statePath}) {
   let state=await readJsonOptional(statePath)??{};
+  // 模型来源解析：host-follow 时主对话模型优先，失败回落 fixed（固定选择缺失则显式失败）
+  const {resolveSelection}=await import("./hostcatalog.mjs");
+  const resolved=resolveSelection({config,sessionId:event.session_id});
+  if(!resolved.selection) {
+    throw Object.assign(new Error(`宿主模型解析失败（${resolved.fallbackReason}）且未配置 fixed selection`),{reasonCode:"selection_unavailable"});
+  }
   const result=await runNaming({
-    backend,selection:config.selection,state,apply,
+    backend,selection:resolved.selection,state,apply,
     eventUserId:event.user_message_id,
     renameOptions:{
       maxTurns:config.rename.maxTurns,
@@ -30,7 +36,8 @@ async function commandRun({backend,event,config,apply,statePath}) {
       requireFormat:config.rename.requireFormat
     }
   });
-  return {...result,sessionId:event.session_id,selection:config.selection};
+  return {...result,sessionId:event.session_id,selection:resolved.selection,
+    modelSource:resolved.source,sourceModel:resolved.sourceModel??null,fallbackReason:resolved.fallbackReason??null};
 }
 
 async function commandModels() {

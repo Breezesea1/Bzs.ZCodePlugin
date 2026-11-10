@@ -9,7 +9,11 @@ export async function runDoctor({backend,event,config}) {
   const checks=[];
   const check=(name,ok,detail)=>checks.push({name,ok,detail:detail??null});
   // 1. 配置与模型选择
-  check("selection",!!config.selection,config.selection?`${config.selection.providerId} / ${config.selection.modelId} / ${config.selection.options?.reasoningLevel}`:"未配置模型选择");
+  const modelSource=config.model?.source??"fixed";
+  check("selection",!!config.selection||modelSource==="host-follow",
+    config.selection
+      ?`${config.selection.providerId} / ${config.selection.modelId} / ${config.selection.options?.reasoningLevel}（来源 ${modelSource}${modelSource==="host-follow"?"，失败回落此配置":""}）`
+      :`未配置 fixed selection（model.source=${modelSource}）`);
   // 2. 会话定位（SQLite）
   try {
     const history=await readHistory({dbPath:config.sessionDb,sessionId:event.session_id,workspacePath:event.workspace_path??event.cwd});
@@ -21,7 +25,7 @@ export async function runDoctor({backend,event,config}) {
   // 3. 任务索引（改名写入位）
   const indexOk=indexReachable(config.indexDb);
   check("task_index",indexOk,indexOk?"任务索引可读写（cli_title 写入位）":"任务索引不可达："+config.indexDb);
-  // 4. 凭据解密（网关模式下宿主代管凭据，仍检查直连回落用凭据但不阻塞）
+  // 4. 凭据解密（直连凭据从 Desktop 凭据文件本地解密；失败只报告、不阻塞其它检查）
   let credentialsOk=false;
   try {
     const token=await loadLoginToken(join(homedir(),".zcode","v2","credentials.json"));
@@ -30,28 +34,30 @@ export async function runDoctor({backend,event,config}) {
   } catch(error) {
     check("credentials",false,`${error.reasonCode??"error"}: ${error.message}`);
   }
-  // 5. 网关（auto/gateway 模式下探测；direct 或未装时报告但不失败——auto 会回落直连）
-  const gatewayMode=config.gateway?.mode??"auto";
-  if(gatewayMode!=="direct") {
-    try {
-      const {probeHost}=await import("./gateway/gateway-client.mjs");
-      const probe=await probeHost({workspacePath:event.workspace_path??event.cwd,sessionId:event.session_id,timeoutMs:6000});
-      const reachable=probe.hostReachable===true&&probe.ok===true;
-      check("gateway",reachable,reachable
-        ?`网关可达且 Desktop 已配对（paired=${probe.paired}，本地客户端=${probe.localClients}）`
-        :`网关未就绪（${probe.reasonCode??"unknown"}）——${gatewayMode==="gateway"?"强制网关模式下为致命":"auto 模式将回落直连"}`);
-    } catch(error) {
-      check("gateway",false,`网关探测异常：${error.message}`);
-    }
-  } else {
-    check("gateway",true,"direct 模式：不使用网关");
-  }
-  // 6. 模型目录
+  // 5. 模型目录（0.4.0 起无网关，直连静态目录）
   try {
     const view=await backend.models();
-    const provider=(view.providers??[]).find(p=>p.providerId===resolveFamily(config.selection?.providerId));
-    const model=provider?.models?.find(m=>m.modelId===config.selection?.modelId);
-    check("model_catalog",!!model,model?`${model.modelId} 档位 ${(model.config?.optionSpecs?.reasoningLevel?.values??[]).join("/")}`:"所选模型不在直连目录中");
+    // host-follow：先解析主对话模型，展示实际将用的 selection；失败回落 fixed 并注明原因
+    let effective=config.selection,followNote=null,hostResolved=false;
+    if(modelSource==="host-follow") {
+      const {resolveHostSelection}=await import("./hostcatalog.mjs");
+      const host=resolveHostSelection({dbPath:config.sessionDb,sessionId:event.session_id});
+      if(host.status==="ok") {effective=host.selection;followNote=`host-follow → ${host.source.providerId}/${host.source.modelId}（家族 ${host.selection.providerId}）`;hostResolved=true;}
+      else {followNote=`host-follow 解析失败（${host.status}）→ 回落 fixed${config.selection?"":"，但未配置 fixed selection！"}`;}
+    }
+    if(!effective) {
+      check("model_catalog",false,followNote??"未配置 selection 且非 host-follow 模式");
+    } else if(modelSource==="host-follow"&&hostResolved) {
+      // host-follow 透传模型名：直调端点接受任意模型名，目录只校验家族覆盖，不精确匹配承载 ID
+      const provider=(view.providers??[]).find(p=>p.providerId===effective.providerId);
+      check("model_catalog",!!provider,provider
+        ?`${followNote}：家族 ${effective.providerId} 在直连目录（端点透传模型名）`
+        :`${followNote}：家族 ${effective.providerId} 不在直连目录中`);
+    } else {
+      const provider=(view.providers??[]).find(p=>p.providerId===resolveFamily(effective.providerId,effective.modelId));
+      const model=provider?.models?.find(m=>m.modelId===effective.modelId);
+      check("model_catalog",!!model,model?`${followNote?followNote+"：":""}${model.modelId} 档位 ${(model.config?.optionSpecs?.reasoningLevel?.values??[]).join("/")}`:`${followNote?followNote+"：":""}模型 ${effective.modelId} 不在直连目录中`);
+    }
   } catch(error) {
     check("model_catalog",false,error.message);
   }

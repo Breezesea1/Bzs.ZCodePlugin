@@ -2,7 +2,7 @@
 // 命名 worker CLI。hook 派发的 "run" 命令从 stdin 读会话事件完成一次命名；
 // 其余命令供技能（setup/configuration/control/debug）与排障使用。
 // 本文件只做进程事务：argv/stdin 解析、配置装载、worker 互斥、日志与退出码；
-// 命令实现在 commands.mjs，数据访问在 history.mjs，网关协议在 backend.mjs/gateway/。
+// 命令实现在 commands.mjs，数据访问在 history.mjs，模型调用在 backend.mjs/modelcall.mjs。
 import {homedir} from "node:os";
 import {join,resolve} from "node:path";
 import {open,mkdir,appendFile,unlink} from "node:fs/promises";
@@ -14,13 +14,13 @@ import {writeJsonAtomic} from "./fsutil.mjs";
 const COMMANDS=["run","doctor","models","probe","status","enable","disable","lock","unlock","policy"];
 // 只有 run 写会话状态并与并发命名互斥；管理命令随时可跑，不被 worker 阻塞。
 const LOCKED_COMMANDS=new Set(["run"]);
-// 需要附着网关的命令才构造 backend；status/enable/disable/probe/models 纯本地或自含连接。
+// 需要会话数据/标题策略的命令才构造 backend；status/enable/disable/probe/models 纯本地或自含连接。
 const BACKEND_COMMANDS=new Set(["run","doctor","lock","unlock","policy"]);
 // 管理命令没有真实会话上下文：models 允许 stdin {}，用占位会话 + cwd 兜底附着。
 const PLACEHOLDER_SESSION="sess_cli_manage";
 
 function usage() {
-  console.log("用法：node cli.mjs run [--apply] [--config 文件]\n      node cli.mjs doctor|models|probe|status|enable|disable [--config 文件]\n      node cli.mjs lock|unlock|policy [--config 文件]（固定/解除固定/查询会话标题策略；先校验目标会话存在）\nstdin JSON：session_id、workspace_path（或 cwd）、可选 user_message_id；models/status/enable/disable 可传 {}。\n所有原宿主调用统一走公共网关；请先按公共 skill 安装或重载网关。");
+  console.log("用法：node cli.mjs run [--apply] [--config 文件]\n      node cli.mjs doctor|models|probe|status|enable|disable [--config 文件]\n      node cli.mjs lock|unlock|policy [--config 文件]（固定/解除固定/查询会话标题策略；先校验目标会话存在）\nstdin JSON：session_id、workspace_path（或 cwd）、可选 user_message_id；models/status/enable/disable 可传 {}。\n直连本机数据层与模型端点，无需网关、无需外部服务。");
 }
 
 function parseArgs(argv) {

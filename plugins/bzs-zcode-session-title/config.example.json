@@ -6,6 +6,9 @@
       "reasoningLevel": "low"
     }
   },
+  "model": {
+    "source": "fixed"
+  },
   "dataDir": "state",
   "timeoutMs": 120000,
   "maxOutputTokens": 2048,

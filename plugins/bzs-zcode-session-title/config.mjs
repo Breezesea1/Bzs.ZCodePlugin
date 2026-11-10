@@ -64,20 +64,24 @@ export async function loadConfig(configPath,{env=process.env,allowDisabled=false
   }
   if(typeof supplied!=="object"||supplied===null||Array.isArray(supplied))return {error:"invalid_config",message:"配置必须是 JSON 对象"};
   if(supplied.enabled===false&&!allowDisabled)return {error:"disabled",message:"自动命名已暂停"};
-  // 0.3.1 起 sqlite3 CLI 由 node:sqlite 内嵌取代：旧配置里的 sqliteBin 字段读入后丢弃
+  // 旧配置兼容：0.3.1 起 sqlite3 CLI 由 node:sqlite 取代，0.4.0 起网关已移除；两个字段读入即丢弃
   const {sqliteBin:_deprecated,...knownSupplied}=supplied;
+  const {gateway:_removed,...merged}=knownSupplied;
   const config={
     ...CONFIG_DEFAULTS,
-    ...knownSupplied,
+    ...merged,
     rename:{...CONFIG_DEFAULTS.rename,...(supplied.rename??"")}
   };
-  const selectionError=validateSelection(config.selection);
-  if(selectionError)return {error:"selection_invalid",message:selectionError};
-  // 网关模式：auto（缺省）= 有网关走宿主模型，否则直连；gateway = 强制网关，不可达即失败；
-  // direct = 禁用网关路径。仅校验取值，可达性由 backend 运行时探测。
-  const gatewayMode=config.gateway?.mode??"auto";
-  if(!["auto","gateway","direct"].includes(gatewayMode))return {error:"invalid_config",message:"gateway.mode 应为 auto/gateway/direct"};
-  config.gateway={...config.gateway,mode:gatewayMode};
+  // 模型来源：fixed（缺省）= 用配置的 selection；host-follow = 跟随主对话模型，失败回落 fixed
+  const modelSource=config.model?.source??"fixed";
+  if(!["fixed","host-follow"].includes(modelSource))return {error:"invalid_config",message:"model.source 应为 fixed/host-follow"};
+  config.model={...config.model,source:modelSource};
+  // fixed 模式必须配置 selection；host-follow 允许缺省 selection（宿主解析失败时报错而非假成功）
+  if(modelSource==="fixed"&&!config.selection)return {error:"selection_invalid",message:"fixed 模式必须配置 selection"};
+  if(config.selection) {
+    const selectionError=validateSelection(config.selection);
+    if(selectionError)return {error:"selection_invalid",message:selectionError};
+  }
   if(!Number.isInteger(config.timeoutMs)||config.timeoutMs<1000||config.timeoutMs>300000)return {error:"invalid_config",message:"timeoutMs 应在 1000–300000 范围内"};
   if(!Number.isInteger(config.maxOutputTokens)||config.maxOutputTokens<256||config.maxOutputTokens>16384)return {error:"invalid_config",message:"maxOutputTokens 应在 256–16384 范围内"};
   if(config.rename.maxTitleChars<10||config.rename.maxTitleChars>96)return {error:"invalid_config",message:"rename.maxTitleChars 应在 10–96 范围内"};

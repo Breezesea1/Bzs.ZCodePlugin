@@ -51,51 +51,23 @@ export function createBackend({event,config,saveState,prompt,generate=generateTe
       return (await loadIndexRowForSession())!==null;
     },
     async models() {
-      // 网关模式：模型目录来自宿主 model-selection.getView（跟随主对话可选模型）。
-      // 探测失败静默回落静态直连目录——models 是无副作用的查询，失败不应阻断配置校验。
-      if(config.gateway?.mode==="gateway"||config.gateway?.mode==="auto") {
-        try {
-          const {connectHost}=await import("./gateway/gateway-client.mjs");
-          const ws=await resolveWorkspace();
-          const connection=await connectHost({workspacePath:ws,sessionId,timeoutMs:8000,handshakeTimeoutMs:4000});
-          try {return await connection.call("model-selection","getView",[]);}finally {connection.close();}
-        }catch {}
-      }
       // 直连模式：返回本地静态目录供 validateSelection 校验
       return modelCatalog();
     },
     async generate(context,selection) {
-      // 网关模式：借宿主模型路由生成（selection 由命名层按宿主目录校验后透传），
-      // 计费/凭据全由宿主管理；网关不可达时回落直连。
-      if(config.gateway?.mode==="gateway"||config.gateway?.mode==="auto") {
-        try {
-          const {connectHost}=await import("./gateway/gateway-client.mjs");
-          const ws=await resolveWorkspace();
-          const connection=await connectHost({workspacePath:ws,sessionId,timeoutMs:config.timeoutMs,handshakeTimeoutMs:4000});
-          try {
-            const view=await connection.call("model-selection","getView",[]);
-            const selectionError=validateSelection(selection,view);
-            if(selectionError)throw new Error(selectionError);
-            return await connection.call("zcode-agent","generateWorkspaceText",[{
-              workspacePath:ws,selection,
-              messages:[{role:"system",content:prompt},{role:"user",content:JSON.stringify(context)}],
-              tools:[],querySource:"session_title_external",
-              maxOutputTokens:config.maxOutputTokens,
-              requestTimeoutMs:config.timeoutMs
-            }]);
-          }finally {connection.close();}
-        }catch(error) {
-          if(config.gateway?.mode==="gateway")throw error; // 强网关模式不回落
-          // auto 模式：网关失败回落直连（网关未装/未启动是常态而非故障）
-        }
-      }
-      // 直连模式：家族推断 → 静态目录校验 → 直调
+      if(!selection)throw new Error("缺少模型选择");
+      // 家族推断 → 目录校验 → 直调。
+      // passthrough（host-follow 命中由 resolveSelection 显式标记）表示模型名是主对话透传的裸名，
+      // 直调端点接受任意模型名，故只校验家族覆盖；fixed 与 host-follow 回落走目录内精确匹配。
+      // 来源不再靠 providerId 是否恰好等于家族名来猜。
       const catalog=modelCatalog();
       // providerId 只用于家族推断（如 magpie→bigmodel），目录校验按家族名进行
       const {resolveFamily}=await import("./modelcall.mjs");
       let family;
-      try {family=resolveFamily(selection.providerId);}catch(error){throw new Error(error.message);}
-      const selectionError=validateSelection({...selection,providerId:family},catalog);
+      try {family=resolveFamily(selection.providerId,selection.modelId);}catch(error){throw new Error(error.message);}
+      const selectionError=selection.passthrough
+        ?(catalog.providers.some(p=>p.providerId===family)?null:`模型家族 ${family} 不在直连目录中`)
+        :validateSelection({...selection,providerId:family},catalog);
       if(selectionError)throw new Error(selectionError);
       return generate({
         selection,

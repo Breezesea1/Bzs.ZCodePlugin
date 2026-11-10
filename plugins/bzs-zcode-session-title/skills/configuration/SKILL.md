@@ -11,16 +11,16 @@ description: 配置 ZCode 自动总结命名的模型、思考档位、标题格
 
 ```jsonc
 {
-  // 模型选择（必填；providerId 需含 bigmodel/magpie/glm 或 zai，模型来自 models 命令目录）
+  // 模型选择（fixed 模式必填；host-follow 可省，作为回落配置）
   "selection": {
     "providerId": "magpie",
     "modelId": "GLM-5.3-Flash",
     "options": { "reasoningLevel": "low" }  // minimal/low/medium/high/xhigh 中的可用档位
   },
+  "model": { "source": "fixed" },  // fixed（默认，用 selection）| host-follow（跟随主对话模型，失败回落 selection）
   "enabled": true,            // 总开关；false 时 Stop hook 静默跳过
   "timeoutMs": 120000,        // 1000–300000，单次模型调用超时
   "maxOutputTokens": 2048,    // 256–16384，总结输出上限
-  "sqliteBin": "sqlite3",     // 或 SQLITE_BIN 环境变量；建议绝对路径
   "rename": {
     "requireFormat": true,    // 标题必须符合「emoji 对象｜目标」结构
     "maxTitleChars": 48,      // 10–96，标题 Unicode 字符上限

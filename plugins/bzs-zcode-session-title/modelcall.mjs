@@ -22,8 +22,10 @@ const CLIENT_VERSION="3.12.3";
 const REFRESH_BEFORE_MS=10*60*1000;
 
 // selection.providerId → 家族。与 Desktop 预设（bigmodel-api / account:bigmodel-*-coding-plan 等）同构。
-export function resolveFamily(providerId) {
+// modelId 可选：仅 magpie 聚合承载时用于区分 MiniMax 与 GLM（承载方按模型 ID 区分）
+export function resolveFamily(providerId,modelId="") {
   const id=String(providerId??"");
+  if(id.includes("magpie")&&String(modelId).includes("MiniMax"))return "minimax";
   // magpie 是本地聚合 provider，承载方按模型 ID 区分：MiniMax-M* 走 minimax，其余为 GLM（bigmodel 家族）
   if(id.includes("minimax")||id.includes("MiniMax"))return "minimax";
   if(id.includes("bigmodel")||id.includes("magpie")||id.includes("glm"))return "bigmodel";
@@ -138,8 +140,8 @@ async function loadMinimaxKey(credentialsPath,env) {
 let cached=null;
 export function resetTokenCache() {cached=null;}
 
-// 直连模式下的静态模型目录：validateSelection 需要形如宿主 getView 的视图结构。
-// 直调端点接受任意模型名，目录只做家族覆盖校验。
+// fixed 模式的候选清单（沿用宿主 getView 的视图结构，供 validateSelection / models 命令使用）。
+// 它不是宿主能力目录：直调端点接受任意模型名，host-follow 透传时不在此做模型名精确匹配。
 export function modelCatalog() {
   return {providers:Object.entries(FAMILIES).map(([family,endpoint])=>({
     providerId:family,
