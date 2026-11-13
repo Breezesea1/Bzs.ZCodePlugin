@@ -4,72 +4,66 @@ import {createBackend} from "../backend.mjs";
 
 const config={
   sessionDb:"D:/no-such-db.sqlite",indexDb:"D:/no-such-index.sqlite",
-  timeoutMs:5000,
+  timeoutMs:5000,maxOutputTokens:2048,
   titlePolicyDirectory:"D:/no-such-policy"
 };
-const event={session_id:"sess_direct1",workspace_path:"D:\w"};
+const event={session_id:"sess_direct1",workspace_path:"D:\\w"};
+const sampleCatalog={
+  providers:[
+    {
+      providerId:"magpie",
+      providerName:"magpie",
+      config:{api:{type:"openai-responses",baseUrl:"http://127.0.0.1:3425"},access:{type:"api-key",apiKey:"k"}},
+      models:[
+        {modelId:"bzs/group/gemini-4-carbon",config:{optionSpecs:{reasoningLevel:{values:["low","medium","high"]}}}}
+      ]
+    },
+    {
+      providerId:"openrouter-custom",
+      providerName:"OpenRouter",
+      config:{api:{type:"anthropic-messages",baseUrl:"https://openrouter.ai/api"},access:{type:"api-key",apiKey:"or"}},
+      models:[
+        {modelId:"anthropic/claude-sonnet-5.5",config:{optionSpecs:{reasoningLevel:{values:["low","high"]}}}}
+      ]
+    }
+  ]
+};
 
 test("构造：无效 session_id 直接拒绝",()=>{
   assert.throws(()=>createBackend({event:{session_id:"bad"},config,prompt:"p"}),/session_id/);
 });
 
-test("generate：passthrough 选择只验家族覆盖，允许目录外的宿主裸模型名",async()=>{
-  let called=0;
+test("generate：宿主目录中的任意渠道与模型均可校验通过并透传 provider/model 配置调用",async()=>{
+  let captured=null;
   const backend=createBackend({
-    event,config,prompt:"p",
-    generate:async()=>{called++;return{text:"host"};},
+    event,config,prompt:"p",catalog:sampleCatalog,
+    generate:async args=>{captured=args;return{text:"ok"};},
     env:{}
   });
-  // 模型名不在 fixed 候选目录内（glm-5.3-flash），靠显式 passthrough 标记放行
-  const result=await backend.generate({},{providerId:"bigmodel",modelId:"glm-5.3-flash",options:{reasoningLevel:"low"},passthrough:true});
-  assert.equal(result.text,"host");
-  assert.equal(called,1);
+  const result=await backend.generate({},{providerId:"magpie",modelId:"bzs/group/gemini-4-carbon",options:{reasoningLevel:"low"}});
+  assert.equal(result.text,"ok");
+  assert.equal(captured.provider.providerId,"magpie");
+  assert.equal(captured.model.modelId,"bzs/group/gemini-4-carbon");
   backend.close();
 });
 
 test("generate：目录校验不过时直接拒绝，不发起模型调用",async()=>{
   let called=0;
   const backend=createBackend({
-    event,config,prompt:"p",
+    event,config,prompt:"p",catalog:sampleCatalog,
     generate:async()=>{called++;return{};},
     env:{}
   });
   await assert.rejects(
     ()=>backend.generate({},{providerId:"unknown-provider",modelId:"M",options:{reasoningLevel:"low"}}),
-    /不在直连目录中|providerId/
+    /不在宿主可用模型目录中/
   );
   assert.equal(called,0);
-});
-
-test("generate：fixed 模式直接直连",async()=>{
-  let called=0;
-  const backend=createBackend({
-    event,config,prompt:"p",
-    generate:async()=>{called++;return{text:"direct"};},
-    env:{}
-  });
-  const result=await backend.generate({},{providerId:"bigmodel",modelId:"GLM-5.3-Flash",options:{reasoningLevel:"low"}});
-  assert.equal(result.text,"direct");
-  assert.equal(called,1);
-  backend.close();
-});
-
-test("generate：旧配置残留 gateway 字段不影响直连（0.4.0 起忽略）",async()=>{
-  let called=0;
-  const legacyConfig={...config,gateway:{mode:"auto"}};
-  const backend=createBackend({
-    event,config:legacyConfig,prompt:"p",
-    generate:async()=>{called++;return{text:"legacy-ok"};},
-    env:{}
-  });
-  const result=await backend.generate({},{providerId:"bigmodel",modelId:"GLM-5.3-Flash",options:{reasoningLevel:"low"}});
-  assert.equal(result.text,"legacy-ok");
-  assert.equal(called,1);
   backend.close();
 });
 
 test("rename：索引无目标行时抛错（直写失败不静默）",async()=>{
-  const backend=createBackend({event,config,prompt:"p",env:{}});
+  const backend=createBackend({event,config,prompt:"p",catalog:sampleCatalog,env:{}});
   await assert.rejects(()=>backend.rename("新标题"),/改名未生效|任务索引/);
   backend.close();
 });

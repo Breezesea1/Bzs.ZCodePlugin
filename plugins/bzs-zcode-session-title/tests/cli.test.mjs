@@ -121,15 +121,42 @@ test("CLI policy：会话不存在时报错",async()=>{
   await cleanup();
 });
 
-test("CLI models：stdin 空对象直接返回静态目录",async()=>{
-  const {dataPath,cleanup}=await makeSandbox();
-  const configPath=join(dataPath,"config.json");
-  await writeConfig(configPath,{selection});
-  const {code,out}=await runCli(["models","--config",configPath],{});
+test("CLI models：无 config.json 时也能直接读取宿主模型目录",async()=>{
+  const {dir,dataPath,cleanup}=await makeSandbox();
+  const v2Dir=join(dir,"v2");
+  await mkdir(v2Dir,{recursive:true});
+  const personalPath=join(v2Dir,"provider_config.json");
+  await writeFile(personalPath,JSON.stringify({
+    schemaVersion:1,
+    config:{
+      providerConfigRules:{
+        providerRules:[{
+          providerId:"magpie",
+          providerName:"magpie",
+          enabled:true,
+          config:{
+            access:{type:"api-key",apiKey:"k"},
+            api:{type:"openai-responses",baseUrl:"http://127.0.0.1:3425"},
+            personalModelIds:["bzs/group/gemini-4-carbon"]
+          }
+        }]
+      },
+      modelConfigRules:{providerModelRules:[],manualProviderModelRules:[]}
+    }
+  }));
+  const {code,out}=await runCli(["models","--config",join(dataPath,"no-config-yet.json")],{},{
+    env:{
+      BZS_TITLE_ZCODE_V2_DIR:v2Dir,
+      ZCODE_BUILTIN_PROVIDER_CONFIG_FILE:join(v2Dir,"none.json"),
+      ZCODE_PERSONAL_PROVIDER_CONFIG_FILE:personalPath,
+      BZS_TITLE_CREDENTIALS:join(v2Dir,"none-creds.json")
+    }
+  });
   assert.equal(code,0);
   const result=JSON.parse(out);
   assert.equal(result.status,"models");
-  assert.ok(result.providers.length>0);
+  assert.equal(result.providers[0].providerId,"magpie");
+  assert.equal(result.providers[0].models[0].modelId,"bzs/group/gemini-4-carbon");
   await cleanup();
 });
 

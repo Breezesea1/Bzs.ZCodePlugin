@@ -6,7 +6,7 @@ import {readJsonOptional} from "./fsutil.mjs";
 
 const PROVIDER_ID_RE=/^[\w:@.-]{1,128}$/;
 const MODEL_ID_RE=/^[\w:@.\/ -]{1,128}$/;
-const REASONING_LEVELS=new Set(["minimal","low","medium","high","xhigh"]);
+const REASONING_LEVEL_RE=/^[\w-]{1,32}$/;
 
 export const CONFIG_DEFAULTS={
   sessionDb:join(homedir(),".zcode","cli","db","db.sqlite"),
@@ -39,14 +39,16 @@ export function validateSelection(selection,view) {
   if(typeof modelId!=="string"||!MODEL_ID_RE.test(modelId))return "selection.modelId 无效";
   const options=selection.options??{};
   const level=options.reasoningLevel;
-  if(typeof level!=="string")return "selection.options.reasoningLevel 必须是字符串";
-  if(!REASONING_LEVELS.has(level))return `selection.options.reasoningLevel 不在支持范围：${[...REASONING_LEVELS].join("/")}`;
+  if(typeof level!=="string"||!REASONING_LEVEL_RE.test(level))return "selection.options.reasoningLevel 无效";
   if(!view)return null;
   const provider=(view.providers??[]).find(p=>p.providerId===providerId);
-  const model=provider?.models?.find(m=>m.modelId===modelId);
-  if(!model)return "指定模型不在直连目录中（providerId 需含 bigmodel/zai/minimax 或对应家族名）";
+  if(!provider)return `指定渠道不在宿主可用模型目录中：${providerId}`;
+  const model=provider.models?.find(m=>m.modelId===modelId);
+  if(!model)return `指定模型不在宿主可用模型目录中：${providerId}/${modelId}`;
   const values=model.config?.optionSpecs?.reasoningLevel?.values;
-  if(Array.isArray(values)&&!values.includes(level))return "指定思考档位不可用";
+  if(Array.isArray(values)&&values.length>0&&!values.includes(level)) {
+    return `指定思考档位不可用：${level}（支持：${values.join("/")}）`;
+  }
   return null;
 }
 
@@ -64,24 +66,16 @@ export async function loadConfig(configPath,{env=process.env,allowDisabled=false
   }
   if(typeof supplied!=="object"||supplied===null||Array.isArray(supplied))return {error:"invalid_config",message:"配置必须是 JSON 对象"};
   if(supplied.enabled===false&&!allowDisabled)return {error:"disabled",message:"自动命名已暂停"};
-  // 旧配置兼容：0.3.1 起 sqlite3 CLI 由 node:sqlite 取代，0.4.0 起网关已移除；两个字段读入即丢弃
-  const {sqliteBin:_deprecated,...knownSupplied}=supplied;
-  const {gateway:_removed,...merged}=knownSupplied;
+  // 旧配置兼容：丢弃已移除的 sqliteBin、gateway、model（host-follow）字段
+  const {sqliteBin:_d1,gateway:_d2,model:_d3,...merged}=supplied;
   const config={
     ...CONFIG_DEFAULTS,
     ...merged,
     rename:{...CONFIG_DEFAULTS.rename,...(supplied.rename??"")}
   };
-  // 模型来源：fixed（缺省）= 用配置的 selection；host-follow = 跟随主对话模型，失败回落 fixed
-  const modelSource=config.model?.source??"fixed";
-  if(!["fixed","host-follow"].includes(modelSource))return {error:"invalid_config",message:"model.source 应为 fixed/host-follow"};
-  config.model={...config.model,source:modelSource};
-  // fixed 模式必须配置 selection；host-follow 允许缺省 selection（宿主解析失败时报错而非假成功）
-  if(modelSource==="fixed"&&!config.selection)return {error:"selection_invalid",message:"fixed 模式必须配置 selection"};
-  if(config.selection) {
-    const selectionError=validateSelection(config.selection);
-    if(selectionError)return {error:"selection_invalid",message:selectionError};
-  }
+  if(!config.selection)return {error:"selection_invalid",message:"必须配置 selection"};
+  const selectionError=validateSelection(config.selection);
+  if(selectionError)return {error:"selection_invalid",message:selectionError};
   if(!Number.isInteger(config.timeoutMs)||config.timeoutMs<1000||config.timeoutMs>300000)return {error:"invalid_config",message:"timeoutMs 应在 1000–300000 范围内"};
   if(!Number.isInteger(config.maxOutputTokens)||config.maxOutputTokens<256||config.maxOutputTokens>16384)return {error:"invalid_config",message:"maxOutputTokens 应在 256–16384 范围内"};
   if(config.rename.maxTitleChars<10||config.rename.maxTitleChars>96)return {error:"invalid_config",message:"rename.maxTitleChars 应在 10–96 范围内"};

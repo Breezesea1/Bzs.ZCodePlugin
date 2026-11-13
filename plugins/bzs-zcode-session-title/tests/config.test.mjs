@@ -13,7 +13,7 @@ async function withConfig(content) {
   return {dir,path,cleanup:()=>rm(dir,{recursive:true,force:true})};
 }
 
-const validSelection={providerId:"account:test",modelId:"GLM-Test",options:{reasoningLevel:"low"}};
+const validSelection={providerId:"magpie",modelId:"bzs/auto/gpt-6.1-sol",options:{reasoningLevel:"ultra"}};
 
 test("loadConfig：不存在时报 not_configured",async()=>{
   const path=join(tmpdir(),"no-such-"+Date.now()+"-"+Math.random().toString(36).slice(2)+".json");
@@ -34,22 +34,28 @@ test("loadConfig：enabled=false 报 disabled",async()=>{
   await cleanup();
 });
 
-test("loadConfig：完整配置合并默认值",async()=>{
-  const {path,cleanup}=await withConfig({selection:validSelection});
-  const {config,error}=await loadConfig(path);
-  assert.equal(error,undefined);
-  assert.equal(config.timeoutMs,CONFIG_DEFAULTS.timeoutMs);
-  assert.equal(config.rename.maxTitleChars,48);
-  assert.equal(config.rename.maxTurns,6);
-  await cleanup();
+test("loadConfig：完整配置合并默认值并支持宿主任意合法档位名（如 ultra/max/disabled/enabled）",async()=>{
+  for(const level of ["disabled","enabled","none","off","low","medium","high","xhigh","max","ultra"]) {
+    const {path,cleanup}=await withConfig({selection:{...validSelection,options:{reasoningLevel:level}}});
+    const {config,error}=await loadConfig(path);
+    assert.equal(error,undefined,level);
+    assert.equal(config.timeoutMs,CONFIG_DEFAULTS.timeoutMs);
+    assert.equal(config.rename.maxTitleChars,48);
+    assert.equal(config.rename.maxTurns,6);
+    await cleanup();
+  }
 });
 
-test("loadConfig：selection 无效时拒绝",async()=>{
-  const {path,cleanup}=await withConfig({selection:{providerId:"account:test",modelId:"GLM",options:{reasoningLevel:"ultra"}}});
-  const result=await loadConfig(path);
-  assert.equal(result.error,"selection_invalid");
-  assert.match(result.message,/reasoningLevel/);
-  await cleanup();
+test("loadConfig：selection 缺失或字段格式非法时拒绝",async()=>{
+  const a=await withConfig({});
+  assert.equal((await loadConfig(a.path)).error,"selection_invalid");
+  await a.cleanup();
+
+  const b=await withConfig({selection:{providerId:"magpie",modelId:"m",options:{reasoningLevel:""}}});
+  const resB=await loadConfig(b.path);
+  assert.equal(resB.error,"selection_invalid");
+  assert.match(resB.message,/reasoningLevel/);
+  await b.cleanup();
 });
 
 test("loadConfig：timeoutMs/maxOutputTokens 范围校验",async()=>{
@@ -70,18 +76,36 @@ test("loadConfig：rename 参数范围校验",async()=>{
   }
 });
 
-test("loadConfig：已废弃的 sqliteBin 字段被忽略",async()=>{
-  const {path,cleanup}=await withConfig({selection:validSelection,sqliteBin:"C:/bin/sqlite3.exe"});
-  const {config}=await loadConfig(path,{env:{}});
+test("loadConfig：已废弃的 sqliteBin / gateway / model 字段被静默丢弃",async()=>{
+  const {path,cleanup}=await withConfig({
+    selection:validSelection,
+    sqliteBin:"C:/bin/sqlite3.exe",
+    gateway:{mode:"direct"},
+    model:{source:"host-follow"}
+  });
+  const {config,error}=await loadConfig(path,{env:{}});
+  assert.equal(error,undefined);
   assert.equal(config.sqliteBin,undefined);
+  assert.equal(config.gateway,undefined);
+  assert.equal(config.model,undefined);
   await cleanup();
 });
 
-test("validateSelection：对照目录视图校验模型与档位",()=>{
-  const view={providers:[{providerId:"account:test",models:[{modelId:"GLM-Test",config:{optionSpecs:{reasoningLevel:{values:["low","medium"]}}}}]}]};
-  assert.equal(validateSelection({providerId:"account:test",modelId:"GLM-Test",options:{reasoningLevel:"medium"}},view),null);
-  assert.match(validateSelection({providerId:"account:test",modelId:"Nope",options:{reasoningLevel:"low"}},view),/不在直连目录中/);
-  assert.match(validateSelection({providerId:"account:test",modelId:"GLM-Test",options:{reasoningLevel:"xhigh"}},view),/档位不可用/);
+test("validateSelection：对照宿主目录视图校验渠道、模型与档位",()=>{
+  const view={
+    providers:[
+      {
+        providerId:"magpie",
+        models:[
+          {modelId:"bzs/group/gemini-4-carbon",config:{optionSpecs:{reasoningLevel:{values:["low","medium","high"]}}}}
+        ]
+      }
+    ]
+  };
+  assert.equal(validateSelection({providerId:"magpie",modelId:"bzs/group/gemini-4-carbon",options:{reasoningLevel:"medium"}},view),null);
+  assert.match(validateSelection({providerId:"nope",modelId:"bzs/group/gemini-4-carbon",options:{reasoningLevel:"low"}},view),/渠道不在宿主可用模型目录中/);
+  assert.match(validateSelection({providerId:"magpie",modelId:"Nope",options:{reasoningLevel:"low"}},view),/模型不在宿主可用模型目录中/);
+  assert.match(validateSelection({providerId:"magpie",modelId:"bzs/group/gemini-4-carbon",options:{reasoningLevel:"ultra"}},view),/档位不可用/);
 });
 
 test("resolveDataDir：env > 配置字段 > 默认 state",()=>{

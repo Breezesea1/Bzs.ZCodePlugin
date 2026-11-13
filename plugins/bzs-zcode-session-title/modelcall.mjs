@@ -1,74 +1,31 @@
-// 模型直调层：凭据解密 → 项目发现 → 短时 token 铸造 → Anthropic 兼容端点调用。
-// 协议自 Desktop 逆向（见 README「直连协议」），零依赖，仅用全局 fetch。
-import {createDecipheriv, createHash} from "node:crypto";
-import {homedir, platform, userInfo} from "node:os";
+// 模型直调层：按宿主模型目录解析出的渠道配置（API 协议、baseUrl、鉴权方式与 optionSpecs），
+// 直接调用对应端点（anthropic-messages / openai-responses / openai-chat-completions）。
+import {homedir} from "node:os";
 import {join} from "node:path";
-import {readFile} from "node:fs/promises";
+import {applyOptionSpecs,decryptCredentialValue,loadHostCatalog,readCredentials} from "./hostcatalog.mjs";
 
-const FAMILIES={
-  bigmodel:{origin:"https://bigmodel.cn",anthropicBase:"https://bigmodel.cn/api/anthropic",bearerAuth:false},
-  zai:{origin:"https://api.z.ai",anthropicBase:"https://api.z.ai/api/anthropic",bearerAuth:true},
-  // MiniMax：官方 Anthropic 兼容端点，静态 Bearer API key（无铸 token 链）
-  minimax:{origin:"https://api.minimax.io",anthropicBase:"https://api.minimax.io/anthropic",bearerAuth:true,staticKey:true}
+const ACCOUNT_ENDPOINTS={
+  bigmodel:{origin:"https://bigmodel.cn",anthropicBase:"https://bigmodel.cn/api/anthropic",bearerAuth:false,oauthKey:"oauth:bigmodel:access_token"},
+  zai:{origin:"https://api.z.ai",anthropicBase:"https://api.z.ai/api/anthropic",bearerAuth:true,oauthKey:"oauth:zai:access_token"}
 };
-// MiniMax 家族：providerId → 目录 providerId 的映射（magpie 聚合承载方为 MiniMax-M3.1-Flash）
-export const MINIMAX_MODELS=[
-  {modelId:"MiniMax-M3.1-Flash",config:{optionSpecs:{reasoningLevel:{values:["low","medium","high"]}}}},
-  {modelId:"MiniMax-M3",config:{optionSpecs:{reasoningLevel:{values:["low","medium","high","xhigh"]}}}}
-];
-const MINIMAX_KEY_NAME="oauth:minimax:api_key";
-const CLIENT_VERSION="3.12.3";
-// token 在到期前 refreshBeforeMs 提前重铸，避免调用中途过期
+const CLIENT_VERSION="3.17.2";
 const REFRESH_BEFORE_MS=10*60*1000;
 
-// selection.providerId → 家族。与 Desktop 预设（bigmodel-api / account:bigmodel-*-coding-plan 等）同构。
-// modelId 可选：仅 magpie 聚合承载时用于区分 MiniMax 与 GLM（承载方按模型 ID 区分）
-export function resolveFamily(providerId,modelId="") {
-  const id=String(providerId??"");
-  if(id.includes("magpie")&&String(modelId).includes("MiniMax"))return "minimax";
-  // magpie 是本地聚合 provider，承载方按模型 ID 区分：MiniMax-M* 走 minimax，其余为 GLM（bigmodel 家族）
-  if(id.includes("minimax")||id.includes("MiniMax"))return "minimax";
-  if(id.includes("bigmodel")||id.includes("magpie")||id.includes("glm"))return "bigmodel";
-  if(id.includes("zai"))return "zai";
-  throw Object.assign(new Error(`无法从 providerId 推断模型家族：${providerId}`),{reasonCode:"provider_family_unknown"});
-}
-
-function credentialSecret(env=process.env) {
-  const explicit=env.ZCODE_CREDENTIAL_SECRET;
-  if(explicit)return explicit;
-  let user="unknown";
-  try {user=userInfo().username;}catch {}
-  return `zcode-credential-fallback:${platform()}:${homedir()}:${user}`;
-}
-
-export async function loadLoginToken(credentialsPath=join(homedir(),".zcode","v2","credentials.json"),env=process.env) {
-  let raw;
-  try {raw=await readFile(credentialsPath,"utf8");}
-  catch(error) {
-    if(error.code==="ENOENT")throw Object.assign(new Error("凭据文件不存在："+credentialsPath),{reasonCode:"credentials_missing"});
-    throw error;
-  }
-  let parsed;
-  try {parsed=JSON.parse(raw);}catch {throw Object.assign(new Error("凭据文件 JSON 无效"),{reasonCode:"credentials_invalid"});}
-  const stored=parsed["oauth:bigmodel:access_token"];
-  if(typeof stored!=="string"||!stored)throw Object.assign(new Error("凭据中缺少 oauth:bigmodel:access_token"),{reasonCode:"credentials_missing"});
-  if(!stored.startsWith("enc:v1:"))return stored;
-  const [iv,tag,data]=stored.slice(7).split(".");
-  if(!iv||!tag||!data)throw Object.assign(new Error("凭据密文格式无效"),{reasonCode:"credentials_invalid"});
-  const key=createHash("sha256").update(credentialSecret(env)).digest();
-  let plain;
-  try {
-    const decipher=createDecipheriv("aes-256-gcm",key,Buffer.from(iv,"base64url"));
-    decipher.setAuthTag(Buffer.from(tag,"base64url"));
-    plain=Buffer.concat([decipher.update(Buffer.from(data,"base64url")),decipher.final()]).toString("utf8").trim();
-  }catch {throw Object.assign(new Error("凭据解密失败：密钥或密文不匹配"),{reasonCode:"credentials_decrypt_failed"});}
+export async function loadAccountLoginToken(accountType,credentialsPath=join(homedir(),".zcode","v2","credentials.json"),env=process.env) {
+  const endpoint=ACCOUNT_ENDPOINTS[accountType];
+  if(!endpoint)throw Object.assign(new Error(`未知官方账号类型：${accountType}`),{reasonCode:"provider_family_unknown"});
+  const parsed=await readCredentials(credentialsPath,env);
+  if(!parsed)throw Object.assign(new Error("凭据文件不存在："+credentialsPath),{reasonCode:"credentials_missing"});
+  const stored=parsed[endpoint.oauthKey];
+  if(typeof stored!=="string"||!stored)throw Object.assign(new Error(`凭据中缺少 ${endpoint.oauthKey}`),{reasonCode:"credentials_missing"});
+  const plain=decryptCredentialValue(stored,env);
   if(!plain)throw Object.assign(new Error("解密后凭据为空"),{reasonCode:"credentials_invalid"});
   return plain;
 }
 
-async function fetchJson(url,options) {
+async function fetchJson(url,options,fetchImpl=fetch) {
   let response;
-  try {response=await fetch(url,options);}
+  try {response=await fetchImpl(url,options);}
   catch(error) {throw Object.assign(new Error("网络请求失败："+error.message),{reasonCode:"model_network_error",cause:error});}
   const text=await response.text();
   let body;
@@ -79,7 +36,6 @@ async function fetchJson(url,options) {
   return body;
 }
 
-// 个人账号的项目发现：默认机构/默认项目优先（与 Desktop 的个人选择策略一致）
 export function pickPersonalProject(organizations) {
   const eligible=(organizations??[]).map(org=>({
     ...org,projects:(org.projects??[]).filter(p=>String(p.projectType??"").trim()!=="2")
@@ -94,128 +50,333 @@ function keyListUrl(origin,location) {
   return `${origin}/api/biz/v1/organization/${encodeURIComponent(location.organizationId)}/projects/${encodeURIComponent(location.projectId)}/api_keys`;
 }
 
-// 铸造短时项目 token（~5h）。location 缓存长存，token 缓存到临期。
-export async function mintProjectToken({loginToken,family,credentialsPath,env,now=Date.now}) {
-  const endpoint=FAMILIES[family];
-  if(!endpoint)throw Object.assign(new Error(`未知模型家族：${family}`),{reasonCode:"provider_family_unknown"});
-  // 家族登录态：zai 用自己的 oauth token；bigmodel 用解密出的 access_token
-  const authValue=family==="zai"
-    ?await loadFamilyToken(credentialsPath,"oauth:zai:access_token",env)
-    :loginToken;
-  const authHeaders={"Content-Type":"application/json",...(endpoint.bearerAuth?{Authorization:`Bearer ${authValue}`}:{Authorization:authValue})};
-  const info=await fetchJson(`${endpoint.origin}/api/biz/customer/getCustomerInfo`,{headers:authHeaders});
-  const location=pickPersonalProject(info.data?.organizations);
+export async function mintProjectToken({loginToken,accountType,teamLocation=null,fetchImpl=fetch,now=Date.now}) {
+  const endpoint=ACCOUNT_ENDPOINTS[accountType];
+  if(!endpoint)throw Object.assign(new Error(`未知官方账号类型：${accountType}`),{reasonCode:"provider_family_unknown"});
+  const authHeaders={"Content-Type":"application/json",...(endpoint.bearerAuth?{Authorization:`Bearer ${loginToken}`}:{Authorization:loginToken})};
+  let location=teamLocation;
+  if(!location) {
+    const info=await fetchJson(`${endpoint.origin}/api/biz/customer/getCustomerInfo`,{headers:authHeaders},fetchImpl);
+    location=pickPersonalProject(info.data?.organizations);
+  }
   const listUrl=keyListUrl(endpoint.origin,location);
-  const list=await fetchJson(listUrl,{headers:authHeaders});
+  const list=await fetchJson(listUrl,{headers:authHeaders},fetchImpl);
   const entries=Array.isArray(list.data)?list.data:[];
   const keyEntry=entries.find(e=>e?.name==="zcode-api-key")
-    ??(await fetchJson(listUrl,{method:"POST",headers:authHeaders,body:JSON.stringify({name:"zcode-api-key",usageScene:"CODING_PLAN"})})).data;
+    ??(await fetchJson(listUrl,{method:"POST",headers:authHeaders,body:JSON.stringify({name:"zcode-api-key",usageScene:"CODING_PLAN"})},fetchImpl)).data;
   if(!keyEntry?.apiKey)throw Object.assign(new Error("项目 API key 条目无效"),{reasonCode:"model_token_mint_failed"});
   const access=await fetchJson(`${listUrl}/${encodeURIComponent(keyEntry.apiKey)}/access_tokens`,{
     method:"POST",headers:authHeaders,body:JSON.stringify({clientType:"zcode",clientVersion:CLIENT_VERSION})
-  });
+  },fetchImpl);
   const payload=access.data;
   if(!payload?.enabled||!payload.accessToken)throw Object.assign(new Error("项目 token 铸造被拒绝"),{reasonCode:"model_token_mint_failed"});
-  return {token:payload.accessToken,expiresAt:now()+ (payload.expiresIn??18000)*1000};
+  return {token:payload.accessToken,expiresAt:now()+(payload.expiresIn??18000)*1000};
 }
 
-async function loadFamilyToken(credentialsPath,key,env) {
-  const raw=JSON.parse(await readFile(credentialsPath,"utf8"));
-  const stored=raw[key];
-  if(typeof stored!=="string"||!stored)throw Object.assign(new Error(`凭据中缺少 ${key}`),{reasonCode:"credentials_missing"});
-  if(!stored.startsWith("enc:v1:"))return stored;
-  const [iv,tag,data]=stored.slice(7).split(".");
-  const cipherKey=createHash("sha256").update(credentialSecret(env)).digest();
-  const decipher=createDecipheriv("aes-256-gcm",cipherKey,Buffer.from(iv,"base64url"));
-  decipher.setAuthTag(Buffer.from(tag,"base64url"));
-  return Buffer.concat([decipher.update(Buffer.from(data,"base64url")),decipher.final()]).toString("utf8").trim();
+const tokenCache=new Map();
+export function resetTokenCache() {tokenCache.clear();}
+
+async function resolveAccountToken({access,credentialsPath,env=process.env,fetchImpl=fetch,now=Date.now}) {
+  const cacheKey=JSON.stringify([access.accountType,access.teamLocation??null]);
+  const hit=tokenCache.get(cacheKey);
+  if(hit&&now()<hit.expiresAt-REFRESH_BEFORE_MS)return hit.token;
+  const loginToken=await loadAccountLoginToken(access.accountType,credentialsPath,env);
+  const minted=await mintProjectToken({loginToken,accountType:access.accountType,teamLocation:access.teamLocation??null,fetchImpl,now});
+  tokenCache.set(cacheKey,minted);
+  return minted.token;
 }
 
-// minimax 家族的静态 API key：enc:v1 加密存于 credentials.json（与 OAuth 条目同套加密）
-async function loadMinimaxKey(credentialsPath,env) {
-  return loadFamilyToken(credentialsPath,MINIMAX_KEY_NAME,env);
-}
-
-// 进程内 token 缓存：worker 短命，但一次 run 可能调 2 次模型（invalid_keep_title 重试）
-let cached=null;
-export function resetTokenCache() {cached=null;}
-
-// fixed 模式的候选清单（沿用宿主 getView 的视图结构，供 validateSelection / models 命令使用）。
-// 它不是宿主能力目录：直调端点接受任意模型名，host-follow 透传时不在此做模型名精确匹配。
-export function modelCatalog() {
-  return {providers:Object.entries(FAMILIES).map(([family,endpoint])=>({
-    providerId:family,
-    models:family==="minimax"
-      ?MINIMAX_MODELS
-      :[
-        {modelId:"GLM-5.3-Flash",config:{optionSpecs:{reasoningLevel:{values:["minimal","low","medium","high"]}}}},
-        {modelId:"GLM-5.3",config:{optionSpecs:{reasoningLevel:{values:["minimal","low","medium","high","xhigh"]}}}},
-        {modelId:"GLM-4.7",config:{optionSpecs:{reasoningLevel:{values:["minimal","low","medium","high","xhigh"]}}}}
-      ],
-    anthropicBase:endpoint.anthropicBase
-  }))};
-}
-
-export async function resolveAccessToken({credentialsPath,env=process.env,now=Date.now,providerId}={}) {
-  const family=resolveFamily(providerId);
-  if(family==="minimax")return loadMinimaxKey(credentialsPath,env);
-  if(cached&&now()<cached.expiresAt-REFRESH_BEFORE_MS)return cached.token;
-  const loginToken=await loadLoginToken(credentialsPath,env);
-  const minted=await mintProjectToken({loginToken,family,credentialsPath,env,now});
-  cached={token:minted.token,expiresAt:minted.expiresAt};
-  return cached.token;
-}
-
-// Anthropic 兼容 messages 调用。messages 为 [{role,content}]，content 为纯文本。
-export async function generateText({selection,messages,maxOutputTokens,timeoutMs,credentialsPath,env=process.env,fetchImpl=fetch,now=Date.now}) {
-  const family=resolveFamily(selection.providerId);
-  const endpoint=FAMILIES[family];
-  const token=env.BZS_TITLE_TEST_TOKEN??await resolveAccessToken({credentialsPath,env,now,providerId:selection.providerId});
-  const reasoning=selection.options?.reasoningLevel;
-  let body;
-  if(family==="minimax") {
-    // MiniMax M3.1-Flash 始终思考（effort 缺省 max），思考与 text 共享 max_tokens，
-    // 与 GLM 同款抬顶避免 text 块被挤没；effort 映射自 selection 档位（档位名一致，xhigh→xhigh）。
-    const effortMap={minimal:"low",low:"low",medium:"medium",high:"high",xhigh:"xhigh"};
-    body={
-      model:selection.modelId,
-      messages,
-      max_tokens:Math.max(maxOutputTokens,8192),
-      output_config:{effort:effortMap[reasoning]??"medium"}
-    };
-  } else {
-    // thinking 档位下思考与 text 共享 max_tokens，GLM 实际思考可达 3-4k tokens；
-    // 标题 JSON 本身很小，请求时按需抬高上限避免 text 块被思考挤没（计费按实际用量）。
-    const budget=reasoning&&reasoning!=="minimal"
-      ?{max_tokens:Math.max(maxOutputTokens,8192),thinking:{type:"enabled",budget_tokens:4096}}
-      :{max_tokens:maxOutputTokens};
-    body={model:selection.modelId,messages,...budget};
+// 供 doctor / probe 校验所选渠道的凭据是否就绪（不发起大模型推理请求）
+export async function verifyProviderAuth({provider,credentialsPath=join(homedir(),".zcode","v2","credentials.json"),env=process.env}) {
+  if(!provider)return {ok:false,error:"渠道不在宿主可用模型目录中"};
+  const access=provider.config?.access;
+  const api=provider.config?.api;
+  if(access?.type==="zhipu-account") {
+    const token=await loadAccountLoginToken(access.accountType,credentialsPath,env);
+    return {ok:token.length>0,authType:`zhipu-account:${access.accountType}`,apiType:api?.type,baseUrl:ACCOUNT_ENDPOINTS[access.accountType]?.anthropicBase??api?.baseUrl};
   }
+  const apiKey=access?.apiKey?.trim();
+  if(!apiKey)return {ok:false,error:`渠道 ${provider.providerId} 缺少 API Key`};
+  return {ok:true,authType:access?.type??"api-key",apiType:api?.type,baseUrl:api?.baseUrl};
+}
+
+export function normalizeAnthropicBaseUrl(baseUrl) {
+  const trimmed=String(baseUrl??"").trim();
+  try {
+    const u=new URL(trimmed);
+    const cleanPath=u.pathname.replace(/\/+$/u,"");
+    u.pathname=cleanPath.toLowerCase().endsWith("/v1")?cleanPath:`${cleanPath}/v1`;
+    return u.href.replace(/\/+$/u,"");
+  }catch {
+    const clean=trimmed.replace(/\/+$/u,"");
+    return clean.toLowerCase().endsWith("/v1")?clean:`${clean}/v1`;
+  }
+}
+
+function isOpenRouterUrl(baseUrl) {
+  try {
+    const host=new URL(baseUrl).hostname.toLowerCase();
+    return host==="openrouter.ai"||host.endsWith(".openrouter.ai");
+  }catch {return false;}
+}
+
+function mergeHeaders(...groups) {
+  const out={};
+  for(const group of groups) {
+    for(const [k,v] of Object.entries(group??{})) {
+      if(v===undefined||v===null)continue;
+      for(const existing of Object.keys(out)) {
+        if(existing.toLowerCase()===k.toLowerCase())delete out[existing];
+      }
+      out[k]=v;
+    }
+  }
+  return out;
+}
+
+function unwrapJsonFence(text) {
+  const trimmed=String(text??"").trim();
+  const match=/^```(?:json)?\s*\r?\n?([\s\S]*?)\r?\n?```$/i.exec(trimmed);
+  return match?match[1].trim():text;
+}
+
+function throwIfBusinessError(payload) {
+  if(!payload||typeof payload!=="object")return;
+  if(payload.type==="error"||payload.error) {
+    const msg=typeof payload.error==="string"?payload.error:(payload.error?.message??payload.error?.msg??payload.message??payload.msg??"unknown");
+    throw Object.assign(new Error("模型错误："+msg),{reasonCode:"model_error"});
+  }
+  if(payload.success===false||(payload.code!==undefined&&payload.code!==0&&payload.code!=="0"&&!payload.content&&!payload.choices&&!payload.output)) {
+    throw Object.assign(new Error("模型错误："+(payload.msg??payload.message??`code=${payload.code}`)),{reasonCode:"model_error"});
+  }
+}
+
+function parseSseFrames(rawText) {
+  const events=[];
+  for(const block of rawText.split(/\r\n\r\n|\n\n|\r\r/)) {
+    const dataLines=[];
+    let eventName=null;
+    for(const line of block.split(/\r\n|\n|\r/)) {
+      if(line.startsWith("event:"))eventName=line.slice(6).trim();
+      else if(line.startsWith("data:"))dataLines.push(line.slice(5).trimStart());
+    }
+    const joined=dataLines.join("\n").trim();
+    if(!joined||joined==="[DONE]")continue;
+    try {events.push({event:eventName,data:JSON.parse(joined)});}catch {}
+  }
+  return events;
+}
+
+function parseAnthropicResponse(payload,rawText,isSse) {
+  if(isSse) {
+    const frames=parseSseFrames(rawText);
+    let text="",stopReason="stop",usage=null;
+    const toolCalls=[];
+    for(const {event,data} of frames) {
+      if(event==="error"||data?.type==="error")throwIfBusinessError(data);
+      if(data?.type==="content_block_start") {
+        if(data.content_block?.type==="text"&&data.content_block.text)text+=data.content_block.text;
+        if(data.content_block?.type==="tool_use")toolCalls.push(data.content_block);
+      } else if(data?.type==="content_block_delta"&&data.delta?.type==="text_delta") {
+        text+=data.delta.text??"";
+      } else if(data?.type==="message_delta") {
+        if(data.delta?.stop_reason)stopReason=data.delta.stop_reason==="end_turn"?"stop":data.delta.stop_reason;
+        if(data.usage)usage={...(usage??{}),...data.usage};
+      } else if(data?.type==="message_start"&&data.message?.usage) {
+        usage={...data.message.usage};
+      }
+    }
+    return {
+      text:unwrapJsonFence(text),
+      finishReason:stopReason,
+      toolCalls,
+      usage:usage?{input_tokens:usage.input_tokens??0,output_tokens:usage.output_tokens??0}:null
+    };
+  }
+  throwIfBusinessError(payload);
+  const textBlocks=(payload.content??[]).filter(b=>b?.type==="text").map(b=>b.text??"").join("");
+  return {
+    text:unwrapJsonFence(textBlocks),
+    finishReason:payload.stop_reason==="end_turn"?"stop":(payload.stop_reason??"stop"),
+    toolCalls:(payload.content??[]).filter(b=>b?.type==="tool_use"),
+    usage:payload.usage?{input_tokens:payload.usage.input_tokens,output_tokens:payload.usage.output_tokens}:null
+  };
+}
+
+function parseOpenAiResponses(payload,rawText,isSse) {
+  if(isSse) {
+    const frames=parseSseFrames(rawText);
+    let completed=null,text="";
+    const toolCalls=[];
+    for(const {event,data} of frames) {
+      if(event==="error"||data?.type==="error")throwIfBusinessError(data);
+      if(data?.type==="response.output_text.delta")text+=data.delta??"";
+      else if(data?.type==="response.output_item.done"&&data.item?.type==="function_call")toolCalls.push(data.item);
+      else if(data?.type==="response.completed"&&data.response)completed=data.response;
+    }
+    if(completed)return parseOpenAiResponses(completed,"",false);
+    return {text:unwrapJsonFence(text),finishReason:"stop",toolCalls,usage:null};
+  }
+  throwIfBusinessError(payload);
+  const output=Array.isArray(payload.output)?payload.output:[];
+  const textParts=[];
+  const toolCalls=[];
+  for(const item of output) {
+    if(item?.type==="message"&&Array.isArray(item.content)) {
+      for(const part of item.content) {
+        if((part?.type==="output_text"||part?.type==="text")&&typeof part.text==="string")textParts.push(part.text);
+      }
+    } else if(item?.type==="function_call") {
+      toolCalls.push(item);
+    }
+  }
+  const text=textParts.length>0?textParts.join(""):(typeof payload.output_text==="string"?payload.output_text:"");
+  const finishReason=payload.status==="incomplete"
+    ?(payload.incomplete_details?.reason??"length")
+    :(payload.status==="completed"||!payload.status?"stop":payload.status);
+  return {
+    text:unwrapJsonFence(text),
+    finishReason,
+    toolCalls,
+    usage:payload.usage?{input_tokens:payload.usage.input_tokens,output_tokens:payload.usage.output_tokens}:null
+  };
+}
+
+function parseOpenAiChatCompletions(payload,rawText,isSse) {
+  if(isSse) {
+    const frames=parseSseFrames(rawText);
+    let text="",finishReason="stop",usage=null;
+    const toolCalls=[];
+    for(const {event,data} of frames) {
+      if(event==="error")throwIfBusinessError(data);
+      if(data?.error)throwIfBusinessError(data);
+      const choice=data?.choices?.[0];
+      if(choice?.delta?.content)text+=choice.delta.content;
+      if(Array.isArray(choice?.delta?.tool_calls))toolCalls.push(...choice.delta.tool_calls);
+      if(choice?.finish_reason)finishReason=choice.finish_reason==="stop"?"stop":choice.finish_reason;
+      if(data?.usage)usage=data.usage;
+    }
+    return {
+      text:unwrapJsonFence(text),
+      finishReason,
+      toolCalls,
+      usage:usage?{input_tokens:usage.prompt_tokens??usage.input_tokens,output_tokens:usage.completion_tokens??usage.output_tokens}:null
+    };
+  }
+  throwIfBusinessError(payload);
+  const choice=payload.choices?.[0];
+  const rawContent=choice?.message?.content;
+  const text=typeof rawContent==="string"
+    ?rawContent
+    :Array.isArray(rawContent)?rawContent.filter(p=>p?.type==="text").map(p=>p.text??"").join(""):"";
+  return {
+    text:unwrapJsonFence(text),
+    finishReason:choice?.finish_reason==="stop"?"stop":(choice?.finish_reason??"stop"),
+    toolCalls:choice?.message?.tool_calls??[],
+    usage:payload.usage?{input_tokens:payload.usage.prompt_tokens??payload.usage.input_tokens,output_tokens:payload.usage.completion_tokens??payload.usage.output_tokens}:null
+  };
+}
+
+// 统一模型生成入口：根据宿主目录中的 provider / model 配置直调对应协议端点。
+export async function generateText({selection,provider,model,catalog,messages,maxOutputTokens,timeoutMs,credentialsPath,env=process.env,fetchImpl=fetch,now=Date.now}) {
+  let resolvedProvider=provider;
+  let resolvedModel=model;
+  if(!resolvedProvider||!resolvedModel) {
+    const view=catalog??await loadHostCatalog({env});
+    resolvedProvider??=(view.providers??[]).find(p=>p.providerId===selection.providerId);
+    resolvedModel??=resolvedProvider?.models?.find(m=>m.modelId===selection.modelId);
+  }
+  if(!resolvedProvider)throw Object.assign(new Error(`渠道不在宿主可用模型目录中：${selection.providerId}`),{reasonCode:"provider_not_found"});
+  if(!resolvedModel)throw Object.assign(new Error(`模型不在宿主可用模型目录中：${selection.providerId}/${selection.modelId}`),{reasonCode:"model_not_found"});
+
+  const access=resolvedProvider.config.access;
+  let apiType=resolvedProvider.config.api.type;
+  let baseUrl=resolvedProvider.config.api.baseUrl;
+  let token;
+
+  if(access.type==="zhipu-account") {
+    // 官方账号渠道（Start Plan / Individual / Team Coding Plan）：
+    // zcode.z.ai 试用网关要求桌面内嵌 WebView 滑块校验，Node 直连统一走官方账号铸 token 端点
+    const endpoint=ACCOUNT_ENDPOINTS[access.accountType];
+    if(!endpoint)throw Object.assign(new Error(`不支持的官方账号类型：${access.accountType}`),{reasonCode:"provider_family_unknown"});
+    apiType="anthropic-messages";
+    baseUrl=endpoint.anthropicBase;
+    token=env.BZS_TITLE_TEST_TOKEN??await resolveAccountToken({access,credentialsPath,env,fetchImpl,now});
+  } else {
+    token=env.BZS_TITLE_TEST_TOKEN??access.apiKey;
+  }
+
+  const reasoningLevel=selection.options?.reasoningLevel;
+  const thinkingActive=Boolean(reasoningLevel&&!["disabled","none","off","minimal"].includes(reasoningLevel));
+  const requestedMax=thinkingActive?Math.max(maxOutputTokens,8192):maxOutputTokens;
+  const modelMax=resolvedModel.config?.optionSpecs?.maxOutputTokens?.max;
+  const effectiveMaxTokens=Number.isInteger(modelMax)&&modelMax>0?Math.min(requestedMax,modelMax):requestedMax;
+
+  const systemText=messages.filter(m=>m.role==="system").map(m=>m.content).filter(Boolean).join("\n\n");
+  const chatMessages=messages.filter(m=>m.role!=="system").map(m=>({role:m.role,content:m.content}));
+  const attributionHeaders=isOpenRouterUrl(baseUrl)?{"X-OpenRouter-Title":"ZCode","X-OpenRouter-Categories":"programming-app"}:{};
+  const customHeaders=resolvedProvider.config.api.headers??{};
+  const optionSpecs=resolvedModel.config?.optionSpecs;
+
+  let url,headers,body;
+  if(apiType==="anthropic-messages") {
+    url=`${normalizeAnthropicBaseUrl(baseUrl)}/messages`;
+    headers=mergeHeaders(
+      {"content-type":"application/json","anthropic-version":"2023-06-01","x-api-key":token,authorization:`Bearer ${token}`},
+      attributionHeaders,
+      customHeaders
+    );
+    const baseBody={model:selection.modelId,...(systemText?{system:systemText}:{}),messages:chatMessages};
+    body=applyOptionSpecs(baseBody,optionSpecs,{reasoningLevel,maxOutputTokens:effectiveMaxTokens});
+    if(body.max_tokens===undefined)body.max_tokens=effectiveMaxTokens;
+  } else if(apiType==="openai-responses") {
+    url=`${baseUrl.replace(/\/+$/u,"")}/responses`;
+    headers=mergeHeaders(
+      {"content-type":"application/json",authorization:`Bearer ${token}`},
+      attributionHeaders,
+      customHeaders
+    );
+    const baseBody={model:selection.modelId,...(systemText?{instructions:systemText}:{}),input:chatMessages};
+    body=applyOptionSpecs(baseBody,optionSpecs,{reasoningLevel,maxOutputTokens:effectiveMaxTokens});
+    if(body.max_output_tokens===undefined)body.max_output_tokens=effectiveMaxTokens;
+  } else if(apiType==="openai-chat-completions") {
+    url=`${baseUrl.replace(/\/+$/u,"")}/chat/completions`;
+    headers=mergeHeaders(
+      {"content-type":"application/json",authorization:`Bearer ${token}`},
+      attributionHeaders,
+      customHeaders
+    );
+    const baseBody={model:selection.modelId,messages:messages.map(m=>({role:m.role,content:m.content}))};
+    body=applyOptionSpecs(baseBody,optionSpecs,{reasoningLevel,maxOutputTokens:effectiveMaxTokens});
+    if(body.max_completion_tokens===undefined&&body.max_tokens===undefined)body.max_tokens=effectiveMaxTokens;
+  } else {
+    throw Object.assign(new Error(`不支持的渠道协议类型：${apiType}`),{reasonCode:"unsupported_api_type"});
+  }
+
   let response;
   try {
-    response=await fetchImpl(`${endpoint.anthropicBase}/v1/messages`,{
+    response=await fetchImpl(url,{
       method:"POST",
-      headers:{"content-type":"application/json","anthropic-version":"2023-06-01","x-api-key":token,authorization:`Bearer ${token}`},
+      headers,
       body:JSON.stringify(body),
       signal:AbortSignal.timeout(timeoutMs)
     });
   }catch(error) {
     throw Object.assign(new Error("模型请求失败："+error.message),{reasonCode:"model_request_failed",cause:error});
   }
-  const text=await response.text();
-  let payload;
-  try {payload=JSON.parse(text);}catch {payload=null;}
-  if(!response.ok||!payload) {
-    throw Object.assign(new Error(`模型返回 HTTP ${response.status}：${text.slice(0,200)}`),{reasonCode:"model_http_error",httpStatus:response.status});
+
+  const rawText=await response.text();
+  const contentType=(response.headers?.get?.("content-type")??"").toLowerCase();
+  const isSse=contentType.includes("event-stream")||(!rawText.trim().startsWith("{")&&rawText.includes("data:"));
+  let payload=null;
+  if(!isSse) {
+    try {payload=rawText?JSON.parse(rawText):null;}catch {payload=null;}
   }
-  if(payload.type==="error") {
-    throw Object.assign(new Error("模型错误："+(payload.error?.message??"unknown")),{reasonCode:"model_error"});
+  if(!response.ok||(!isSse&&!payload)) {
+    throw Object.assign(new Error(`模型返回 HTTP ${response.status}：${rawText.slice(0,200)}`),{reasonCode:"model_http_error",httpStatus:response.status});
   }
-  const textBlock=(payload.content??[]).find(b=>b.type==="text");
-  return {
-    text:textBlock?.text??"",
-    finishReason:payload.stop_reason==="end_turn"?"stop":payload.stop_reason??"stop",
-    toolCalls:payload.content?.filter(b=>b.type==="tool_use")??[],
-    usage:payload.usage?{input_tokens:payload.usage.input_tokens,output_tokens:payload.usage.output_tokens}:null
-  };
+
+  if(apiType==="anthropic-messages")return parseAnthropicResponse(payload,rawText,isSse);
+  if(apiType==="openai-responses")return parseOpenAiResponses(payload,rawText,isSse);
+  return parseOpenAiChatCompletions(payload,rawText,isSse);
 }

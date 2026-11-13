@@ -1,121 +1,243 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {DatabaseSync} from "node:sqlite";
-import {mkdtempSync} from "node:fs";
+import {createCipheriv,createHash,randomBytes} from "node:crypto";
+import {mkdtemp,mkdir,writeFile,rm} from "node:fs/promises";
 import {join} from "node:path";
 import {tmpdir} from "node:os";
-import {resolveHostSelection,resolveSelection,normalizeHostModelId} from "../hostcatalog.mjs";
+import {loadHostCatalog,evaluateOptionMap,applyOptionSpecs,decryptCredentialValue,credentialSecret} from "../hostcatalog.mjs";
 
-test("normalizeHostModelId：剥 magpie 承载前缀并小写",()=>{
-  assert.equal(normalizeHostModelId("bzs/group/glm-5.3-flash"),"glm-5.3-flash");
-  assert.equal(normalizeHostModelId("GLM-5.3-Flash"),"glm-5.3-flash");
-  assert.equal(normalizeHostModelId("MiniMax-M3.1-Flash"),"minimax-m3.1-flash");
-  assert.equal(normalizeHostModelId("glm-5.3"),"glm-5.3");
-});
-
-function setupDb(rows) {
-  const dir=mkdtempSync(join(tmpdir(),"bzs-hostcatalog-"));
-  const dbPath=join(dir,"db.sqlite");
-  const db=new DatabaseSync(dbPath);
-  db.exec("CREATE TABLE message (id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT)");
-  let i=0;
-  for(const data of rows)db.prepare("INSERT INTO message VALUES (?,?,?,?)").run(`m${i++}`,data.session_id??="sess_t",data.time,data.data);
-  db.close();
-  return dbPath;
+function encryptForTest(plain,env) {
+  const iv=randomBytes(12);
+  const key=createHash("sha256").update(credentialSecret(env)).digest();
+  const cipher=createCipheriv("aes-256-gcm",key,iv);
+  const ct=Buffer.concat([cipher.update(plain,"utf8"),cipher.final()]);
+  return `enc:v1:${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${ct.toString("base64url")}`;
 }
 
-const assistantMsg=(providerId,modelId)=>JSON.stringify({role:"assistant",providerId,modelId});
-const userMsg=()=>JSON.stringify({role:"user"});
+async function makeV2Sandbox() {
+  const dir=await mkdtemp(join(tmpdir(),"bzs-hostcat-"));
+  const runtimeDir=join(dir,"runtime","provider","test");
+  await mkdir(runtimeDir,{recursive:true});
+  return {
+    dir,
+    builtinPath:join(runtimeDir,"zcode-builtin.json"),
+    personalPath:join(dir,"provider_config.json"),
+    credentialsPath:join(dir,"credentials.json"),
+    settingPath:join(dir,"setting.json"),
+    cleanup:()=>rm(dir,{recursive:true,force:true})
+  };
+}
 
-test("resolveHostSelection：取最新 assistant 消息的 provider/model 并归家族",()=>{
-  const dbPath=setupDb([
-    {time:1,data:userMsg()},
-    {time:2,data:assistantMsg("magpie","GLM-5.3-Flash")},
-    {time:3,data:assistantMsg("magpie","bzs/group/glm-5.3-flash")}
-  ]);
-  const r=resolveHostSelection({dbPath,sessionId:"sess_t"});
-  assert.equal(r.status,"ok");
-  assert.equal(r.selection.providerId,"bigmodel");
-  assert.equal(r.selection.modelId,"glm-5.3-flash");
-  assert.equal(r.selection.options.reasoningLevel,"low");
-  assert.deepEqual(r.source,{providerId:"magpie",modelId:"bzs/group/glm-5.3-flash"});
+const sampleBuiltin={
+  schemaVersion:1,
+  revision:43,
+  config:{
+    providerConfigRules:{
+      templateRules:[
+        {
+          templateId:"openrouter",
+          templateNameMap:{"zh-CN":"OpenRouter"},
+          config:{
+            access:{type:"api-key"},
+            api:{type:"anthropic-messages",baseUrl:"https://openrouter.ai/api"},
+            builtinModelIds:["anthropic/claude-sonnet-5.5","deepseek/deepseek-v4-flash"]
+          }
+        }
+      ],
+      providerRules:[
+        {
+          providerId:"account:bigmodel-individual-coding-plan",
+          providerName:"BigModel Individual Coding Plan",
+          config:{
+            group:"bigmodel-family",
+            access:{type:"zhipu-account",mode:"individual-coding-plan",accountType:"bigmodel"},
+            api:{type:"anthropic-messages",baseUrl:"https://open.bigmodel.cn/api/anthropic"},
+            builtinModelIds:["GLM-5.3","GLM-5.3-Flash"]
+          }
+        },
+        {
+          providerId:"account:bigmodel-team-coding-plan",
+          providerName:"BigModel Team Coding Plan",
+          config:{
+            group:"bigmodel-family",
+            access:{type:"zhipu-account",mode:"team-coding-plan",accountType:"bigmodel"},
+            api:{type:"anthropic-messages",baseUrl:"https://open.bigmodel.cn/api/anthropic"},
+            builtinModelIds:["GLM-5.3"]
+          }
+        },
+        {
+          providerId:"account:bigmodel-offpeak-idle-plan",
+          providerName:"Idle",
+          config:{
+            group:"bigmodel-family",
+            access:{type:"zhipu-account",mode:"off-peak",accountType:"bigmodel"},
+            api:{type:"anthropic-messages",baseUrl:"https://zcode.z.ai/api/v1/off-peak/anthropic"},
+            builtinModelIds:["GLM-5.3"]
+          }
+        }
+      ]
+    },
+    modelConfigRules:{
+      modelRules:[
+        {modelMatch:".*",config:{enabled:true,optionSpecs:{reasoningLevel:{values:["disabled","enabled"],map:"{}"},maxOutputTokens:{max:128000}}}},
+        {modelMatch:".*glm-5\\.3.*",config:{optionSpecs:{reasoningLevel:{values:["low","high","max"]}}}},
+        {modelMatch:".*claude-sonnet-5\\.5.*",config:{optionSpecs:{reasoningLevel:{values:["low","medium","high"]}}}}
+      ],
+      modelApiRules:[
+        {
+          modelMatch:".*",
+          apiTypeMatch:"anthropic-messages",
+          config:{optionSpecs:{reasoningLevel:{map:`reasoningLevel == "disabled" ? {"thinking":{"type":"disabled"}} : {"thinking":{"type":"adaptive"},"output_config":{"effort":reasoningLevel}}`},maxOutputTokens:{map:`{"max_tokens": maxOutputTokens}`}}}
+        },
+        {
+          modelMatch:".*",
+          apiTypeMatch:"openai-responses",
+          config:{optionSpecs:{reasoningLevel:{map:`{"reasoning":{"effort":reasoningLevel == "disabled" ? "none" : reasoningLevel}}`},maxOutputTokens:{map:`{"max_output_tokens": maxOutputTokens}`}}}
+        }
+      ],
+      providerSiteRules:[],
+      templateModelRules:[],
+      builtinProviderModelRules:[]
+    }
+  }
+};
+
+test("loadHostCatalog：还原个人自定义渠道、模板派生渠道与已登录官方账号渠道",async()=>{
+  const sb=await makeV2Sandbox();
+  const env={
+    BZS_TITLE_ZCODE_V2_DIR:sb.dir,
+    ZCODE_BUILTIN_PROVIDER_CONFIG_FILE:sb.builtinPath,
+    ZCODE_PERSONAL_PROVIDER_CONFIG_FILE:sb.personalPath,
+    BZS_TITLE_CREDENTIALS:sb.credentialsPath,
+    ZCODE_CREDENTIAL_SECRET:"unit-secret"
+  };
+  await writeFile(sb.builtinPath,JSON.stringify(sampleBuiltin));
+  await writeFile(sb.credentialsPath,JSON.stringify({
+    "oauth:bigmodel:access_token":encryptForTest("jwt-token",env)
+  }));
+  await writeFile(sb.personalPath,JSON.stringify({
+    schemaVersion:1,
+    config:{
+      providerOrder:["magpie","my-openrouter"],
+      providerConfigRules:{
+        providerRules:[
+          {
+            providerId:"magpie",
+            providerName:"magpie",
+            enabled:true,
+            config:{
+              access:{type:"api-key",apiKey:"magpie-secret"},
+              api:{type:"openai-responses",baseUrl:"http://127.0.0.1:3425"},
+              personalModelIds:["bzs/auto/gpt-6.1-sol","bzs/qnaigc/qiniu/conatus-free","bzs/disabled-model"],
+              modelOrder:["bzs/qnaigc/qiniu/conatus-free","bzs/auto/gpt-6.1-sol"]
+            }
+          },
+          {
+            providerId:"my-openrouter",
+            templateId:"openrouter",
+            enabled:true,
+            config:{
+              access:{type:"api-key",apiKey:"sk-or-123"},
+              personalModelIds:["google/gemini-3.8-flash"]
+            }
+          },
+          {
+            providerId:"disabled-provider",
+            enabled:false,
+            config:{
+              access:{type:"api-key",apiKey:"sk-nope"},
+              api:{type:"openai-chat-completions",baseUrl:"https://example.com/v1"},
+              personalModelIds:["m1"]
+            }
+          }
+        ]
+      },
+      modelConfigRules:{
+        providerModelRules:[
+          {providerId:"magpie",modelId:"bzs/auto/gpt-6.1-sol",config:{optionSpecs:{reasoningLevel:{values:["low","medium","high","xhigh","max","ultra"]}}}},
+          {providerId:"magpie",modelId:"bzs/disabled-model",config:{enabled:false}}
+        ],
+        manualProviderModelRules:[]
+      }
+    }
+  }));
+
+  const catalog=await loadHostCatalog({env});
+  assert.deepEqual(catalog.providers.map(p=>p.providerId),[
+    "account:bigmodel-individual-coding-plan",
+    "magpie",
+    "my-openrouter"
+  ],"off-peak、未选中的 team-coding-plan 与 disabled-provider 均不应进入可用目录");
+
+  const magpie=catalog.providers.find(p=>p.providerId==="magpie");
+  assert.deepEqual(magpie.models.map(m=>m.modelId),["bzs/qnaigc/qiniu/conatus-free","bzs/auto/gpt-6.1-sol"],"遵守 modelOrder 且剔除已禁用模型");
+  assert.deepEqual(magpie.models[0].config.optionSpecs.reasoningLevel.values,["disabled","enabled"]);
+  assert.deepEqual(magpie.models[1].config.optionSpecs.reasoningLevel.values,["low","medium","high","xhigh","max","ultra"]);
+
+  const or=catalog.providers.find(p=>p.providerId==="my-openrouter");
+  assert.equal(or.providerName,"OpenRouter");
+  assert.equal(or.config.api.baseUrl,"https://openrouter.ai/api");
+  assert.deepEqual(or.models.map(m=>m.modelId),["anthropic/claude-sonnet-5.5","deepseek/deepseek-v4-flash","google/gemini-3.8-flash"]);
+  assert.deepEqual(or.models[0].config.optionSpecs.reasoningLevel.values,["low","medium","high"]);
+
+  await sb.cleanup();
 });
 
-test("resolveHostSelection：magpie+MiniMax 模型归 minimax 家族",()=>{
-  const dbPath=setupDb([{time:1,data:assistantMsg("magpie","MiniMax-M3.1-Flash")}]);
-  const r=resolveHostSelection({dbPath,sessionId:"sess_t"});
-  assert.equal(r.selection.providerId,"minimax");
-  assert.equal(r.selection.modelId,"minimax-m3.1-flash");
+test("loadHostCatalog：provider_config.json 缺失时兼容旧版 v2/config.json 自定义渠道",async()=>{
+  const sb=await makeV2Sandbox();
+  const env={
+    BZS_TITLE_ZCODE_V2_DIR:sb.dir,
+    ZCODE_BUILTIN_PROVIDER_CONFIG_FILE:join(sb.dir,"missing-builtin.json"),
+    ZCODE_PERSONAL_PROVIDER_CONFIG_FILE:join(sb.dir,"missing-personal.json"),
+    BZS_TITLE_CREDENTIALS:join(sb.dir,"missing-creds.json")
+  };
+  await writeFile(join(sb.dir,"config.json"),JSON.stringify({
+    provider:{
+      "bzs-chat":{
+        name:"BZS Chat",
+        kind:"openai-compatible",
+        enabled:true,
+        source:"custom",
+        options:{baseURL:"https://cpa.example.com/v1",apiKey:"sk-custom"},
+        models:{"deepseek-v4-flash":{reasoning:{variants:["off","low","high","max"]}}}
+      }
+    }
+  }));
+  const catalog=await loadHostCatalog({env});
+  assert.equal(catalog.providers.length,1);
+  assert.equal(catalog.providers[0].providerId,"bzs-chat");
+  assert.equal(catalog.providers[0].config.api.type,"openai-chat-completions");
+  assert.deepEqual(catalog.providers[0].models[0].config.optionSpecs.reasoningLevel.values,["off","low","high","max"]);
+  await sb.cleanup();
 });
 
-test("resolveHostSelection：无 assistant 消息 → no_host_model",()=>{
-  const dbPath=setupDb([{time:1,data:userMsg()}]);
-  const r=resolveHostSelection({dbPath,sessionId:"sess_t"});
-  assert.equal(r.status,"no_host_model");
-  assert.equal(r.selection,null);
+test("evaluateOptionMap 与 applyOptionSpecs：正确求值三元、逻辑运算与 JSON 合并补丁",()=>{
+  const map=`reasoningLevel == "disabled" || reasoningLevel == "none"
+    ? {"thinking":{"type":"disabled"}}
+    : {"thinking":{"type":"adaptive"},"output_config":{"effort":reasoningLevel == "enabled" ? "high" : reasoningLevel}}`;
+  assert.deepEqual(evaluateOptionMap(map,"reasoningLevel","disabled"),{thinking:{type:"disabled"}});
+  assert.deepEqual(evaluateOptionMap(map,"reasoningLevel","enabled"),{thinking:{type:"adaptive"},output_config:{effort:"high"}});
+  assert.deepEqual(evaluateOptionMap(map,"reasoningLevel","ultra"),{thinking:{type:"adaptive"},output_config:{effort:"ultra"}});
+
+  const body=applyOptionSpecs(
+    {model:"m1",input:[{role:"user",content:"hi"}]},
+    {
+      reasoningLevel:{map:`{"reasoning":{"effort":reasoningLevel}}`},
+      maxOutputTokens:{map:`{"max_output_tokens":maxOutputTokens}`}
+    },
+    {reasoningLevel:"medium",maxOutputTokens:4096}
+  );
+  assert.deepEqual(body,{
+    model:"m1",
+    input:[{role:"user",content:"hi"}],
+    reasoning:{effort:"medium"},
+    max_output_tokens:4096
+  });
 });
 
-test("resolveHostSelection：未知 provider → host_family_unknown 带原因",()=>{
-  const dbPath=setupDb([{time:1,data:assistantMsg("openai","gpt-x")}]);
-  const r=resolveHostSelection({dbPath,sessionId:"sess_t"});
-  assert.equal(r.status,"host_family_unknown");
-});
-
-test("resolveHostSelection：残缺/坏行被跳过，无可用品 → no_host_model",()=>{
-  const dbPath=setupDb([{time:1,data:JSON.stringify({role:"assistant",modelId:"M"})}]);
-  assert.equal(resolveHostSelection({dbPath,sessionId:"sess_t"}).status,"no_host_model");
-  const dbPath2=setupDb([{time:1,data:"{broken"}]);
-  assert.equal(resolveHostSelection({dbPath:dbPath2,sessionId:"sess_t"}).status,"no_host_model");
-});
-
-test("resolveHostSelection：坏行后的好行仍可用",()=>{
-  const dbPath=setupDb([
-    {time:1,data:"{broken"},
-    {time:2,data:assistantMsg("magpie","GLM-5.3")}
-  ]);
-  const r=resolveHostSelection({dbPath,sessionId:"sess_t"});
-  assert.equal(r.status,"ok");
-  assert.equal(r.selection.modelId,"glm-5.3");
-});
-
-const fixedConfig={sessionDb:"unused",model:{source:"fixed"},selection:{providerId:"bigmodel",modelId:"GLM-5.3-Flash",options:{reasoningLevel:"medium"}}};
-
-test("resolveSelection：fixed 模式不读库，直接用配置",()=>{
-  const r=resolveSelection({config:fixedConfig,sessionId:"sess_any"});
-  assert.equal(r.source,"fixed");
-  assert.equal(r.selection.options.reasoningLevel,"medium");
-});
-
-test("resolveSelection：host-follow 成功时用宿主模型",()=>{
-  const dbPath=setupDb([{time:1,data:assistantMsg("magpie","GLM-5.3")}]);
-  const r=resolveSelection({config:{...fixedConfig,sessionDb:dbPath,model:{source:"host-follow"}},sessionId:"sess_t"});
-  assert.equal(r.source,"host");
-  assert.equal(r.selection.modelId,"glm-5.3");
-  assert.equal(r.selection.options.reasoningLevel,"low");
-});
-
-test("resolveSelection：host 命中带显式 passthrough 标记，fixed/回落不带",()=>{
-  const dbPath=setupDb([{time:1,data:assistantMsg("magpie","GLM-5.3")}]);
-  const host=resolveSelection({config:{...fixedConfig,sessionDb:dbPath,model:{source:"host-follow"}},sessionId:"sess_t"});
-  assert.equal(host.selection.passthrough,true);
-  const fixed=resolveSelection({config:fixedConfig,sessionId:"sess_any"});
-  assert.equal(fixed.selection.passthrough,undefined);
-  const fbDb=setupDb([{time:1,data:userMsg()}]);
-  const fb=resolveSelection({config:{...fixedConfig,sessionDb:fbDb,model:{source:"host-follow"}},sessionId:"sess_t"});
-  assert.equal(fb.selection.passthrough,undefined);
-});
-
-test("resolveSelection：host-follow 失败回落 fixed 并带原因",()=>{
-  const dbPath=setupDb([{time:1,data:userMsg()}]);
-  const r=resolveSelection({config:{...fixedConfig,sessionDb:dbPath,model:{source:"host-follow"}},sessionId:"sess_t"});
-  assert.equal(r.source,"fixed-fallback");
-  assert.equal(r.fallbackReason,"no_host_model");
-  assert.deepEqual(r.selection,fixedConfig.selection);
-});
-
-test("resolveSelection：host-follow 无 fixed selection 时返回空 selection（调用方显式失败）",()=>{
-  const dbPath=setupDb([{time:1,data:userMsg()}]);
-  const r=resolveSelection({config:{sessionDb:dbPath,model:{source:"host-follow"}},sessionId:"sess_t"});
-  assert.equal(r.source,"fixed-fallback");
-  assert.equal(r.selection,null);
+test("decryptCredentialValue：enc:v1 加解密往返一致",()=>{
+  const env={ZCODE_CREDENTIAL_SECRET:"k1"};
+  const enc=encryptForTest("secret-jwt",env);
+  assert.equal(decryptCredentialValue(enc,env),"secret-jwt");
+  assert.throws(()=>decryptCredentialValue(enc,{ZCODE_CREDENTIAL_SECRET:"wrong"}),{reasonCode:"credentials_decrypt_failed"});
 });

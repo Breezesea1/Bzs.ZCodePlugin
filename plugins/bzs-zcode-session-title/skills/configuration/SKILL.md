@@ -11,13 +11,12 @@ description: 配置 ZCode 自动总结命名的模型、思考档位、标题格
 
 ```jsonc
 {
-  // 模型选择（fixed 模式必填；host-follow 可省，作为回落配置）
+  // 模型选择：可配置宿主 ZCode 中已启用的任意渠道、模型与可用思考档位
   "selection": {
     "providerId": "magpie",
-    "modelId": "GLM-5.3-Flash",
-    "options": { "reasoningLevel": "low" }  // minimal/low/medium/high/xhigh 中的可用档位
+    "modelId": "bzs/auto/glm-5.3-flash",
+    "options": { "reasoningLevel": "low" }  // 按目标模型在宿主目录中实际支持的档位填写
   },
-  "model": { "source": "fixed" },  // fixed（默认，用 selection）| host-follow（跟随主对话模型，失败回落 selection）
   "enabled": true,            // 总开关；false 时 Stop hook 静默跳过
   "timeoutMs": 120000,        // 1000–300000，单次模型调用超时
   "maxOutputTokens": 2048,    // 256–16384，总结输出上限
@@ -30,14 +29,15 @@ description: 配置 ZCode 自动总结命名的模型、思考档位、标题格
 }
 ```
 
-`selection.providerId` / `modelId` / `reasoningLevel` 必须来自真实目录，不接受凭空选择：修改模型前先运行 `node "{{plugin_root}}/cli.mjs" models --config "{{ZCODE_PLUGIN_DATA}}/config.json"`（stdin `{}`）核对模型与档位确实存在。直连模式下 providerId 只需推断家族（含 `bigmodel`/`magpie`/`glm` 走 bigmodel 端点，含 `zai` 走 z.ai 端点）。
+`selection.providerId` / `modelId` / `reasoningLevel` 直接对齐宿主 ZCode 的真实模型目录（包含官方账号渠道、模板派生渠道及所有自定义渠道，支持 `anthropic-messages` / `openai-responses` / `openai-chat-completions` 全部三种协议）：
+修改模型前先运行 `node "{{plugin_root}}/cli.mjs" models`（stdin `{}`）读取宿主当前可用渠道、模型 ID 与支持档位，核对存在后再写入配置。
 
 ## 查询与排障
 
-- `status`（stdin `{}`）：查看生效配置、数据目录与最近一次命名结果。
-- `models`（stdin `{}`）：查询模型目录，无需会话上下文。
+- `status`（stdin `{}`）：查看生效配置、数据目录与命名参数。
+- `models`（stdin `{}`）：直接读取宿主 ZCode 当前可用模型目录与各模型的支持档位，无需会话上下文或已有配置文件。
 - `usage.jsonl` / `runner.log.jsonl` / `hook.log.jsonl` 在数据目录下，按时间倒序看最近几行定位失败原因。
-- 思考档位越高总结越准但越慢；长会话建议 `maxTurns` 6–8、`low` 或 `medium`。
+- 思考档位越高总结越准但越慢；长会话建议 `maxTurns` 6–8、低思考档位（如 `low` / `disabled`）。
 - 标题字符上限 `maxTitleChars` 会同步渲染进总结 prompt（`{{max_title_chars}}` 占位符）。
 
-修改 selection 后必须跑 doctor（stdin 传当前会话）确认 model_catalog 通过，再决定是否 enable。
+修改 selection 后必须跑 doctor（stdin 传当前会话）确认 `model_catalog` 与 `credentials` 通过，再决定是否 enable。

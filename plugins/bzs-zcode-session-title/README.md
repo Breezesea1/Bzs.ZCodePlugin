@@ -10,33 +10,20 @@
 
 标题统一为「类别 emoji + 对象｜核心目标」：对象在前（模块名、工具名或内容主题），目标在后（持续目标而非最后一句）。跟随对话语言，可以暂停，也可以固定某个会话的名称。
 
-## 工作方式（0.3.0 起直连，无网关）
+## 工作方式（零网关直连宿主全量模型）
 
 1. **Stop Hook 触发**：每轮对话结束（`Stop` 事件），宿主以后台方式派发命名 worker（`async:true`，不阻塞对话；由 `stop_hook_active` 跳过续跑轮防止重复）。
 2. **读取会话历史**：worker 直接只读本机 SQLite 会话库（`~/.zcode/cli/db/db.sqlite`），按宿主同源的投影策略筛出真实用户输入与可见助手回复，应用回退记录，取最近 N 轮构造总结上下文。
-3. **模型总结**：直接调用 Anthropic 兼容端点（bigmodel/zai 家族，零中间层）。凭据从 Desktop 凭据文件本地解密（AES-256-GCM），按宿主同款协议铸造短时项目 token（约 5 小时，自动临期重铸），计费走你的 coding plan。
+3. **宿主全量模型目录与多协议直调**：直接读取宿主 ZCode 本地渠道配置（`zcode-builtin.json` + `~/.zcode/v2/provider_config.json` + `credentials.json`），按宿主同构规则还原全部已启用渠道、可用模型、思考档位及 `optionSpecs` 参数映射——**宿主 ZCode 里有什么模型，就能配什么模型**：
+   - 支持宿主全部三种协议栈：`anthropic-messages`、`openai-responses`、`openai-chat-completions`（含 JSON 与 SSE 流式响应兼容）。
+   - 支持所有个人自定义渠道（如本地聚合代理 `magpie`、自建网关）、内置模板派生渠道（OpenAI、Anthropic、OpenRouter、DeepSeek、MiniMax、Kimi、硅基流动、百炼等）以及已登录的官方账号渠道（`account:bigmodel-*` / `account:zai-*`，自动本地解密凭据并铸造短时项目 token）。
 4. **安全改名**：改名直写任务索引（`~/.zcode/v2/tasks-index.sqlite`）的 `cli_title` 官方写入位——与宿主 CLI 会话同款协议，宿主自动镜像到 `title` 列。改名前复查漂移指纹与用户手动改名锁定（`title_overridden`/策略文件双保险），对话中不插入任何消息。
 
-插件**零 npm 依赖、零外部服务**：不需要网关、不需要远控面板、不需要 API key 配置。仅要求 Node.js 22+（内置 `node:sqlite`，直接读写会话库与任务索引，无需 sqlite3 CLI）。
-
-### 模型家族（0.4.0）
-
-直连支持三家族：**bigmodel**（magpie/GLM，铸 token）、**zai**（铸 token）、**minimax**（`MiniMax-M3.1-Flash` / `MiniMax-M3`，静态 API key，凭据名 `oauth:minimax:api_key`，用 `scripts/set-minimax-key.mjs` 写入）。
-
-### 模型来源：fixed / host-follow（0.4.0）
-
-`model.source` 决定总结模型从哪来：
-
-- **`fixed`**（默认）：用配置里的 `selection`，行为与 0.3.x 一致。
-- **`host-follow`**：跟随主对话模型。从会话库最新 assistant 消息读出主对话在用的 `providerId`/`modelId`（就是插件已在只读的同一个库，零常驻、零注入），归入家族、规整模型名（剥 magpie 承载前缀如 `bzs/group/`、小写——直调端点只认小写裸名）后直接调用。**宿主模型解析失败时自动回落 `fixed` 配置**（`run` 结果与 usage 日志带 `modelSource`/`fallbackReason` 可查）。host-follow 模式下 `selection` 可省（省略后宿主解析失败会显式报错而非假成功）。
-
-```jsonc
-"model": { "source": "host-follow" }   // fixed（默认）| host-follow
-```
+插件**零 npm 依赖、零外部服务、零网关劫持**：仅要求 Node.js 22+（内置 `node:sqlite`）。
 
 ## 安装
 
-通过本地插件市场安装后，让 Agent 按 [setup](./skills/setup/SKILL.md) 初始化：核验环境 → 选择模型与档位 → doctor 体检 → 启用。
+通过本地插件市场安装后，让 Agent 按 [setup](./skills/setup/SKILL.md) 初始化：核验环境 → 从宿主目录选择任意模型与档位 → doctor 体检 → 启用。
 
 ## 配置
 
@@ -44,12 +31,11 @@
 
 ```jsonc
 {
-  "selection": {                       // fixed 模式必填；host-follow 可省（作为回落配置）
+  "selection": {
     "providerId": "magpie",
-    "modelId": "GLM-5.3-Flash",
-    "options": { "reasoningLevel": "low" }   // minimal / low / medium / high
+    "modelId": "bzs/auto/glm-5.3-flash",
+    "options": { "reasoningLevel": "low" }   // 填写该模型在宿主目录中实际支持的档位
   },
-  "model": { "source": "fixed" },      // fixed（默认）| host-follow（跟随主对话模型）
   "enabled": true,
   "timeoutMs": 120000,
   "maxOutputTokens": 2048,
@@ -64,6 +50,8 @@
 
 ## 日常操作
 
+- **查询宿主可用模型**：运行 `node cli.mjs models` 查看宿主当前所有可用 `providerId`、`modelId` 与 `reasoningLevels`。
+- **切换模型 / 档位**：[configuration](./skills/configuration/SKILL.md)。
 - **暂停 / 恢复**：[control](./skills/control/SKILL.md) 的 `disable` / `enable`。
 - **固定标题**：界面手动改名会被自动检测并锁定不再覆盖；`lock` / `unlock` 直接操作策略文件。
 - **排障**：[debug](./skills/debug/SKILL.md) 与 `doctor` / `probe` / `status` 命令；日志在数据目录 `state/` 下。
@@ -71,20 +59,13 @@
 ## 命令速查
 
 ```bash
+node cli.mjs models                                               # 列出宿主 ZCode 当前全部可用渠道、模型与档位
 # stdin 传 {"session_id":"...","workspace_path":"..."}
-node cli.mjs doctor --config "${ZCODE_PLUGIN_DATA}/config.json"   # 环境/链路体检
-node cli.mjs models --config ...                                  # 可用模型目录与档位
+node cli.mjs doctor --config "${ZCODE_PLUGIN_DATA}/config.json"   # 环境/目录/鉴权体检
+node cli.mjs probe  --config "${ZCODE_PLUGIN_DATA}/config.json"   # 鉴权与任务索引快速自检
 node cli.mjs run --config ...          # 预览（不改名）
 node cli.mjs run --apply --config ...  # 执行命名
 node cli.mjs lock|unlock|policy --config ...                      # 标题固定策略
 ```
-
-## 已验证范围
-
-- 单元测试 78 项（标题校验、命名状态机、配置校验、SQLite 历史读取、hook 派发、CLI 集成、直连目录校验、prompt 渲染、模型家族、宿主模型跟随与降级链、passthrough 契约）。
-- 真实链路端到端验证（2026-11-08）：真实会话 9 轮 → 凭据解密与项目 token 铸造 → GLM-5.3-Flash 直调总结 → rename 落地任务索引 `cli_title` 位（宿主自动镜像）→ 次轮读回确认后 keep。`doctor` 五项检查全绿。
-- host-follow 端到端验证（2026-11-08）：真实主对话模型 `magpie/bzs/group/glm-5.3-flash` → 家族归并 + 模型名规整 → 真实直调生成标题预览成功（`modelSource:"host"`）；`doctor` 在 host-follow 模式下正确显示来源与回落说明。
-- 指纹漂移护栏：会话在总结期间继续变化时正确返回 `stale_result` 而不覆盖。
-- 用户手动改名保护：`title_overridden=1` 的行直写让位，策略文件锁定互为补充。
 
 **已知取舍**：改名写入后，已打开的任务列表依赖宿主下次刷新（窗口聚焦/列表重开）才显示新标题；列表数据本身实时读库，无数据不一致。

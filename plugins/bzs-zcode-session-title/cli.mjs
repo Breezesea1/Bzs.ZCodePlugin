@@ -64,38 +64,44 @@ if(args.includes("--help")||!args.length) {
   try {
     const {command,configPath:explicitConfigPath,apply}=parseArgs(args);
     const event=await readStdinJson();
-    const configPath=explicitConfigPath??join(process.env.ZCODE_PLUGIN_DATA??process.env.BZS_TITLE_DATA??join(homedir(),".zcode","bzs-zcode-session-title"),"config.json");
-    const loaded=await loadConfig(configPath,{allowDisabled:command!=="run"});
-    // run 命令对未配置/暂停只报状态不报错，方便 hook 静默退出
-    if(loaded.error) {
-      if(command==="run"&&(loaded.error==="disabled"||loaded.error==="not_configured")) {
-        console.log(JSON.stringify({status:loaded.error==="disabled"?"disabled":"not_configured"}));
-      } else throw new Error(loaded.message);
-    } else {
-      const config=loaded.config;
-      const dataDir=resolveDataDir(configPath,config,process.env);
-      await mkdir(dataDir,{recursive:true});
-      const statePath=join(dataDir,(event.session_id??"unknown")+".json");
-      if(BACKEND_COMMANDS.has(command)) {
-        const sessionEvent={
-          ...event,
-          session_id:event.session_id??PLACEHOLDER_SESSION,
-          workspace_path:event.workspace_path??event.cwd??process.cwd()
-        };
-        backend=createBackend({
-          event:sessionEvent,config,
-          prompt:await loadPrompt(import.meta.dirname,config),
-          saveState:async state=>{await writeJsonAtomic(statePath,state);}});
-      }
-      if(LOCKED_COMMANDS.has(command)) {
-        // worker 互斥：避免并发命名互相踩踏状态文件与改名
-        leasePath=join(dataDir,"worker.lock");
-        await acquireLease(leasePath);
-      }
-      const result=await executeCommand({command,event,config,configPath,dataDir,backend,apply,statePath});
+    if(command==="models") {
+      // 查询宿主模型目录不依赖本插件是否已完成 config.json 初始化
+      const result=await executeCommand({command:"models",env:process.env});
       console.log(JSON.stringify(result));
-      if(command==="run")await appendFile(join(dataDir,"usage.jsonl"),JSON.stringify({at:new Date().toISOString(),...result})+"\n","utf8").catch(()=>{});
-      await appendFile(join(dataDir,"runner.log.jsonl"),JSON.stringify({at:new Date().toISOString(),command,sessionId:event.session_id??null,status:result.status,reasonCode:result.reasonCode??null,title:result.title??null,durationMs:Date.now()-startedAt})+"\n","utf8").catch(()=>{});
+    } else {
+      const configPath=explicitConfigPath??join(process.env.ZCODE_PLUGIN_DATA??process.env.BZS_TITLE_DATA??join(homedir(),".zcode","bzs-zcode-session-title"),"config.json");
+      const loaded=await loadConfig(configPath,{allowDisabled:command!=="run"});
+      // run 命令对未配置/暂停只报状态不报错，方便 hook 静默退出
+      if(loaded.error) {
+        if(command==="run"&&(loaded.error==="disabled"||loaded.error==="not_configured")) {
+          console.log(JSON.stringify({status:loaded.error==="disabled"?"disabled":"not_configured"}));
+        } else throw new Error(loaded.message);
+      } else {
+        const config=loaded.config;
+        const dataDir=resolveDataDir(configPath,config,process.env);
+        await mkdir(dataDir,{recursive:true});
+        const statePath=join(dataDir,(event.session_id??"unknown")+".json");
+        if(BACKEND_COMMANDS.has(command)) {
+          const sessionEvent={
+            ...event,
+            session_id:event.session_id??PLACEHOLDER_SESSION,
+            workspace_path:event.workspace_path??event.cwd??process.cwd()
+          };
+          backend=createBackend({
+            event:sessionEvent,config,
+            prompt:await loadPrompt(import.meta.dirname,config),
+            saveState:async state=>{await writeJsonAtomic(statePath,state);}});
+        }
+        if(LOCKED_COMMANDS.has(command)) {
+          // worker 互斥：避免并发命名互相踩踏状态文件与改名
+          leasePath=join(dataDir,"worker.lock");
+          await acquireLease(leasePath);
+        }
+        const result=await executeCommand({command,event,config,configPath,dataDir,backend,apply,statePath});
+        console.log(JSON.stringify(result));
+        if(command==="run")await appendFile(join(dataDir,"usage.jsonl"),JSON.stringify({at:new Date().toISOString(),...result})+"\n","utf8").catch(()=>{});
+        await appendFile(join(dataDir,"runner.log.jsonl"),JSON.stringify({at:new Date().toISOString(),command,sessionId:event.session_id??null,status:result.status,reasonCode:result.reasonCode??null,title:result.title??null,durationMs:Date.now()-startedAt})+"\n","utf8").catch(()=>{});
+      }
     }
   } catch(error) {
     const failure={status:"failed",error:String(error.message).slice(0,300)};

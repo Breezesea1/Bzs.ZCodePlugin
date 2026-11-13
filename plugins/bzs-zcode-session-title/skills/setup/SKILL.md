@@ -8,16 +8,16 @@ description: 初始化、升级或卸载 ZCode 会话自动总结与重命名，
 原生插件根为 `${ZCODE_SKILL_DIR}/../..`；Hook 与技能由宿主加载，配置与状态保存在插件数据目录 `${ZCODE_PLUGIN_DATA}`。
 
 1. 环境核验：确认 Node.js 22+（需内置 `node:sqlite`，`node --version`）。会话库与任务索引由 `node:sqlite` 直接读写，不需要 sqlite3 CLI。本插件零 npm 依赖、零外部服务，不需要 `npm install`。
-2. 直连前提：本插件直连本机数据层——读会话库（`~/.zcode/cli/db/db.sqlite`）、写任务索引（`~/.zcode/v2/tasks-index.sqlite`）、模型直调 Anthropic 兼容端点（凭据从 `~/.zcode/v2/credentials.json` 本地解密，按 Desktop 同款协议铸造项目 token）。不需要网关、不需要远控面板、不需要 API key；保持 Desktop 已登录 bigmodel/zai 账号即可。MiniMax 模型需先运行 `node "{{plugin_root}}/scripts/set-minimax-key.mjs" --key "<API_KEY>"` 写入静态 API key（凭据名 `oauth:minimax:api_key`；脚本固定写 `~/.zcode/v2/credentials.json`，不读 config）。**禁止任何形式的网关/relay 劫持方案**（历史教训 2026-11-08：写用户级 env 劫持 Desktop 远控 relay 会弄坏手机远控，该机制已从本插件移除）。
-3. 初始化配置：仅当 `${ZCODE_PLUGIN_DATA}/config.json` 不存在时，从插件根 `config.example.json` 复制并把 `enabled` 设为 `false`（首次保持暂停，等模型选择完成后再启用）。已有配置保留原开关、模型选择与自定义字段，不因重复安装而重置。配置字段详见 [configuration](../configuration/SKILL.md)。
-4. 选择模型与档位：运行 `node "{{plugin_root}}/cli.mjs" models --config "{{ZCODE_PLUGIN_DATA}}/config.json"`（stdin 传 `{}`）取静态目录（bigmodel/zai/minimax 三家族），列出 modelId 与支持档位，由用户选择后写回 `selection`。providerId 需含 `bigmodel`/`magpie`/`glm`（bigmodel 家族）、`zai`，或 `minimax`/`MiniMax`（minimax 家族）。
-5. 验证：stdin 传 `{"session_id":"<当前会话ID>","workspace_path":"<当前工作区>"}` 运行 `node cli.mjs doctor --config ...`，检查 selection / history / task_index / credentials / model_catalog 五项；再运行 `probe`。全部通过后执行 `enable`，并运行一次 `node cli.mjs run --apply --config ...`（同一 stdin）做端到端确认。
+2. 直连前提：本插件直接读取本机数据层与宿主渠道配置——读会话库（`~/.zcode/cli/db/db.sqlite`）、写任务索引（`~/.zcode/v2/tasks-index.sqlite`）、从宿主 `zcode-builtin.json` + `~/.zcode/v2/provider_config.json` + `credentials.json` 还原完整可用模型目录，并按目标渠道协议（`anthropic-messages` / `openai-responses` / `openai-chat-completions`）直接调用模型端点。不需要网关、不需要远控面板、不需要额外在插件里重复配置 API key。**禁止任何形式的网关/relay 劫持方案**。
+3. 选择模型与档位：运行 `node "{{plugin_root}}/cli.mjs" models`（stdin 传 `{}`）读取宿主 ZCode 当前已启用的全部渠道、模型 ID 与支持档位，供用户选择目标 `providerId` / `modelId` / `reasoningLevel`。
+4. 初始化配置：若 `${ZCODE_PLUGIN_DATA}/config.json` 不存在，写入包含用户所选 `selection` 的配置（若尚未确认模型，先从 `config.example.json` 复制并设 `"enabled": false`）。已有配置保留原开关、模型选择与自定义字段，不因重复安装而重置。配置字段详见 [configuration](../configuration/SKILL.md)。
+5. 验证：stdin 传 `{"session_id":"<当前会话ID>","workspace_path":"<当前工作区>"}` 运行 `node cli.mjs doctor --config ...`，检查 selection / history / task_index / model_catalog / credentials 五项；再运行 `probe`。全部通过后执行 `enable`，并运行一次 `node cli.mjs run --apply --config ...`（同一 stdin）做端到端确认。
 
 首次环境未就绪时，交付本机配置与待验证报告，不在当前会话外做任何全局改动。
 
 ## 升级
 
-通过原生插件管理器更新本插件后，从新插件清单获取路径，重跑同一初始化与 doctor 命令。保留配置、状态与标题锁；不做数据迁移。0.2.x/0.3.x 的网关配置字段（`gatewayConfigPath`、`gateway`）已废弃，可从 config.json 中删除。0.4.0 起支持 `model.source: "host-follow"` 跟随主对话模型（失败自动回落 `selection`）。
+通过原生插件管理器更新本插件后，重跑 `models` 与 `doctor` 核对所选 `selection` 是否在宿主当前可用模型目录中。旧版配置残留的 `sqliteBin`、`gateway`、`model` 字段会自动忽略。
 
 ## 卸载
 

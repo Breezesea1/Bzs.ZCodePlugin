@@ -8,14 +8,14 @@
     {
       "name": "bzs-zcode-session-title",
       "source": "./bzs-zcode-session-title",
-      "version": "0.4.0",
-      "description": "Auto-summarize each conversation turn and rename the session title, with configurable model (fixed or host-follow) and reasoning level.",
+      "version": "0.5.0",
+      "description": "Auto-summarize each conversation turn and rename the session title, supporting any model and reasoning level configured in host ZCode.",
       "displayName": "Bzs Session Title",
       "displayName_i18n": {
         "zh-CN": "会话自动总结命名"
       },
       "description_i18n": {
-        "zh-CN": "会话自动总结与重命名：每轮对话结束后总结会话内容并更新标题，支持配置模型与思考档位"
+        "zh-CN": "会话自动总结与重命名：每轮对话结束后总结会话内容并更新标题，支持自由配置宿主 ZCode 中的任意可用模型与思考档位"
       },
       "category": "productivity"
     },

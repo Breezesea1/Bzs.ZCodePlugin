@@ -1,13 +1,10 @@
 {
   "selection": {
-    "providerId": "magpie",
+    "providerId": "account:bigmodel-individual-coding-plan",
     "modelId": "GLM-5.3-Flash",
     "options": {
       "reasoningLevel": "low"
     }
-  },
-  "model": {
-    "source": "fixed"
   },
   "dataDir": "state",
   "timeoutMs": 120000,
