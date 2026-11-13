@@ -32,29 +32,33 @@ function workspaceKeyOf(workspacePath) {
 // 读取任务行（与宿主 rowToMeta 同投影）。找不到行返回 null。
 export function loadTaskRow({dbPath,sessionId,workspacePath}) {
   const row=connect(dbPath).prepare(
-    "SELECT task_id,title,title_overridden,cli_title,cli_title_source,archived,deleted,task_status FROM tasks WHERE workspace_key=? AND task_id=?"
+    "SELECT task_id,title,title_overridden,cli_title,cli_title_source,handoff_pending,archived,deleted,task_status FROM tasks WHERE workspace_key=? AND task_id=?"
   ).get(workspaceKeyOf(workspacePath),sessionId);
   return row??null;
 }
 
-// 改名（写 cli_title 位）。返回是否命中行。
-// handoff_pending 位语义（宿主 applyCliFacts 同款）：bit2=标题漂移待交割，写入新 cli_title 后应清除。
-export function renameTask({dbPath,sessionId,workspacePath,title}) {
+// 改名（同步写 title 与 cli_title 位）。返回是否命中并写入。
+// 首次写 cli_title_source='custom' 后，宿主 applyCliFacts 会把 title_overridden 置 1；
+// UI 查询按 title_overridden=1 ? title : cli_title 取值，因此二次及后续改名需同步写两列，
+// 并仅在 handoff_pending bit2=1（UI 有未交割手动改名）或有效标题已漂移时让位回滚。
+export function renameTask({dbPath,sessionId,workspacePath,title,expectedTitle}) {
   const key=workspaceKeyOf(workspacePath);
   const db=connect(dbPath);
   db.exec("BEGIN IMMEDIATE");
   try {
-    const row=db.prepare("SELECT title_overridden,cli_title_source FROM tasks WHERE workspace_key=? AND task_id=?").get(key,sessionId);
+    const row=db.prepare("SELECT title,cli_title,title_overridden,cli_title_source,handoff_pending FROM tasks WHERE workspace_key=? AND task_id=?").get(key,sessionId);
     if(!row) {db.exec("ROLLBACK");return false;}
-    // 用户已在界面手动改名（title_overridden=1）时不覆盖：宿主对 custom 来源同样让位
-    if(row.title_overridden===1) {db.exec("ROLLBACK");return false;}
+    if(((row.handoff_pending??0)&2)!==0) {db.exec("ROLLBACK");return false;}
+    const currentTitle=row.title_overridden===1?row.title:(row.cli_title??row.title);
+    if(expectedTitle!==undefined&&currentTitle!==expectedTitle) {db.exec("ROLLBACK");return false;}
     db.prepare(
       `UPDATE tasks SET
+        title=?,
         cli_title=?,
         cli_title_source='custom',
         cli_updated_at=?
       WHERE workspace_key=? AND task_id=?`
-    ).run(title,Date.now(),key,sessionId);
+    ).run(title,title,Date.now(),key,sessionId);
     db.exec("COMMIT");
     return true;
   }catch(error) {

@@ -173,4 +173,13 @@ test("mintProjectToken 与 verifyProviderAuth：官方账号铸 token 与 API Ke
     provider:{providerId:"magpie",config:{api:{type:"openai-responses",baseUrl:"http://127.0.0.1:3425"},access:{type:"api-key",apiKey:"k"}}}
   });
   assert.equal(authOk.ok,true);
+
+  await assert.rejects(
+    ()=>mintProjectToken({
+      loginToken:"bad-jwt",
+      accountType:"bigmodel",
+      fetchImpl:async()=>({ok:true,status:200,text:async()=>JSON.stringify({code:401,success:false,msg:"令牌已过期或验证不正确"})})
+    }),
+    {reasonCode:"credentials_invalid"}
+  );
 });

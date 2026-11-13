@@ -60,10 +60,12 @@ if(args.includes("--help")||!args.length) {
   usage();
 } else {
   const startedAt=Date.now();
-  let leasePath=null,backend=null;
+  let leasePath=null,backend=null,resolvedDataDir=null,parsedCommand=null,parsedEvent=null;
   try {
     const {command,configPath:explicitConfigPath,apply}=parseArgs(args);
+    parsedCommand=command;
     const event=await readStdinJson();
+    parsedEvent=event;
     if(command==="models") {
       // 查询宿主模型目录不依赖本插件是否已完成 config.json 初始化
       const result=await executeCommand({command:"models",env:process.env});
@@ -79,6 +81,7 @@ if(args.includes("--help")||!args.length) {
       } else {
         const config=loaded.config;
         const dataDir=resolveDataDir(configPath,config,process.env);
+        resolvedDataDir=dataDir;
         await mkdir(dataDir,{recursive:true});
         const statePath=join(dataDir,(event.session_id??"unknown")+".json");
         if(BACKEND_COMMANDS.has(command)) {
@@ -107,6 +110,18 @@ if(args.includes("--help")||!args.length) {
     const failure={status:"failed",error:String(error.message).slice(0,300)};
     if(error.reasonCode)failure.reasonCode=error.reasonCode;
     if(error.stage)failure.stage=error.stage;
+    if(resolvedDataDir&&parsedCommand) {
+      await appendFile(join(resolvedDataDir,"runner.log.jsonl"),JSON.stringify({
+        at:new Date().toISOString(),
+        command:parsedCommand,
+        sessionId:parsedEvent?.session_id??null,
+        status:"failed",
+        reasonCode:error.reasonCode??null,
+        error:failure.error,
+        title:null,
+        durationMs:Date.now()-startedAt
+      })+"\n","utf8").catch(()=>{});
+    }
     console.log(JSON.stringify(failure));
     process.exitCode=1;
   } finally {

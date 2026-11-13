@@ -3,11 +3,82 @@
 // 按宿主 ProviderConfigResolver / ModelConfigRules 同构规则还原所有已启用渠道、可用模型、
 // 支持的思考档位及请求体映射表达式（Restricted CEL），零常驻、零网关。
 import {createDecipheriv,createHash} from "node:crypto";
-import {existsSync,readdirSync,statSync} from "node:fs";
+import {existsSync,readdirSync,readFileSync,statSync} from "node:fs";
 import {readFile} from "node:fs/promises";
+import {createRequire} from "node:module";
 import {homedir,platform,userInfo} from "node:os";
-import {join,resolve} from "node:path";
+import {dirname,join,resolve} from "node:path";
 import {readJsonOptional} from "./fsutil.mjs";
+
+const requireAddon=createRequire(import.meta.url);
+const KEYRING_SERVICE="ZCode Credential Encryption";
+let cachedKeyringAddon;
+
+function loadHostKeyringAddon(env=process.env,homeDir=homedir()) {
+  if(cachedKeyringAddon!==undefined)return cachedKeyringAddon;
+  const dirs=[];
+  if(env.ZCODE_WINDOWS_APP_INSTALL_DIR?.trim()) {
+    dirs.push(join(env.ZCODE_WINDOWS_APP_INSTALL_DIR.trim(),"resources","app.asar.unpacked","node_modules","@napi-rs"));
+  }
+  const localAppData=env.LOCALAPPDATA||join(homeDir,"AppData","Local");
+  dirs.push(
+    join(localAppData,"Programs","ZCode","resources","app.asar.unpacked","node_modules","@napi-rs"),
+    "/Applications/ZCode.app/Contents/Resources/app.asar.unpacked/node_modules/@napi-rs",
+    "/opt/ZCode/resources/app.asar.unpacked/node_modules/@napi-rs"
+  );
+  for(const base of dirs) {
+    if(!existsSync(base))continue;
+    try {
+      for(const sub of readdirSync(base)) {
+        if(!sub.startsWith("keyring-"))continue;
+        const subDir=join(base,sub);
+        const nodeFile=readdirSync(subDir).find(f=>f.endsWith(".node"));
+        if(nodeFile) {
+          cachedKeyringAddon=requireAddon(join(subDir,nodeFile));
+          return cachedKeyringAddon;
+        }
+      }
+    }catch {}
+  }
+  cachedKeyringAddon=null;
+  return null;
+}
+
+function openGcmEnvelope(envelope,key) {
+  const parts=envelope.split(".");
+  if(parts.length!==3||parts.some(p=>!p||!/^[A-Za-z0-9_-]+$/.test(p))) {
+    throw Object.assign(new Error("凭据密文格式无效"),{reasonCode:"credentials_invalid"});
+  }
+  const [iv,tag,data]=parts.map(p=>Buffer.from(p,"base64url"));
+  if(iv.length!==12||tag.length!==16) {
+    throw Object.assign(new Error("凭据密文格式无效"),{reasonCode:"credentials_invalid"});
+  }
+  try {
+    const decipher=createDecipheriv("aes-256-gcm",key,iv);
+    decipher.setAuthTag(tag);
+    return Buffer.concat([decipher.update(data),decipher.final()]).toString("utf8").trim();
+  }catch {
+    throw Object.assign(new Error("凭据解密失败：密钥或密文不匹配"),{reasonCode:"credentials_decrypt_failed"});
+  }
+}
+
+function resolveManagedSecretSync(credentialsPath,env=process.env) {
+  if(env.ZCODE_CREDENTIAL_SECRET&&env.ZCODE_CREDENTIAL_SECRET_FILE) {
+    throw Object.assign(new Error("ZCODE_CREDENTIAL_SECRET 与 ZCODE_CREDENTIAL_SECRET_FILE 不能同时配置"),{reasonCode:"credentials_decrypt_failed"});
+  }
+  if(env.ZCODE_CREDENTIAL_SECRET)return env.ZCODE_CREDENTIAL_SECRET;
+  const secretFile=env.ZCODE_CREDENTIAL_SECRET_FILE||(credentialsPath?join(dirname(resolve(credentialsPath)),"credential-secret"):null);
+  if(!secretFile||!existsSync(secretFile))return null;
+  try {
+    const content=readFileSync(secretFile,"utf8");
+    const len=Buffer.byteLength(content,"utf8");
+    return len>=32&&len<=4096?content:null;
+  }catch {return null;}
+}
+
+function keyFingerprint(key) {
+  return createHash("sha256").update(key).digest("hex").slice(0,24);
+}
 
 const SUPPORTED_API_TYPES=new Set(["anthropic-messages","openai-chat-completions","openai-responses"]);
 const SELECTABLE_ACCOUNT_MODES=new Set(["start-plan","individual-coding-plan","team-coding-plan"]);
@@ -35,21 +106,65 @@ export function credentialSecret(env=process.env) {
   return `zcode-credential-fallback:${platform()}:${homedir()}:${user}`;
 }
 
-export function decryptCredentialValue(stored,env=process.env) {
+export function decryptCredentialValue(stored,env=process.env,{credentialsPath=null,homeDir=homedir(),osKeyReader=null}={}) {
   if(typeof stored!=="string"||!stored)return null;
-  if(!stored.startsWith("enc:v1:"))return stored.trim()||null;
-  const [iv,tag,data]=stored.slice(7).split(".");
-  if(!iv||!tag||!data)throw Object.assign(new Error("凭据密文格式无效"),{reasonCode:"credentials_invalid"});
-  const key=createHash("sha256").update(credentialSecret(env)).digest();
-  let plain;
-  try {
-    const decipher=createDecipheriv("aes-256-gcm",key,Buffer.from(iv,"base64url"));
-    decipher.setAuthTag(Buffer.from(tag,"base64url"));
-    plain=Buffer.concat([decipher.update(Buffer.from(data,"base64url")),decipher.final()]).toString("utf8").trim();
-  }catch {
-    throw Object.assign(new Error("凭据解密失败：密钥或密文不匹配"),{reasonCode:"credentials_decrypt_failed"});
+  if(stored.startsWith("enc:v1:")) {
+    const envelope=stored.slice(7);
+    const managed=resolveManagedSecretSync(credentialsPath,env);
+    const fallback=credentialSecret(env);
+    const secrets=[...new Set([managed,managed?.trim(),fallback].filter(Boolean))];
+    let lastError=null;
+    for(const secret of secrets) {
+      try {
+        const key=createHash("sha256").update(secret).digest();
+        return openGcmEnvelope(envelope,key)||null;
+      }catch(error) {lastError=error;}
+    }
+    throw lastError??Object.assign(new Error("凭据解密失败：密钥或密文不匹配"),{reasonCode:"credentials_decrypt_failed"});
   }
-  return plain||null;
+  if(stored.startsWith("enc:v2:")) {
+    const segments=stored.slice(7).split(":");
+    if(segments.length!==3||!["os","env"].includes(segments[0])||!/^[a-f0-9]{24}$/.test(segments[1])||!segments[2]) {
+      throw Object.assign(new Error("凭据密文格式无效"),{reasonCode:"credentials_invalid"});
+    }
+    const [source,expectedFp,envelope]=segments;
+    let key;
+    if(source==="env") {
+      const secret=resolveManagedSecretSync(credentialsPath,env);
+      if(!secret)throw Object.assign(new Error("凭据解密失败：未找到受管密钥"),{reasonCode:"credentials_decrypt_failed"});
+      key=createHash("sha256").update(secret).digest();
+    } else {
+      const resolvedCredsPath=resolve(credentialsPath??join(homeDir,".zcode","v2","credentials.json"));
+      const account=createHash("sha256").update(resolvedCredsPath).digest("hex");
+      let encodedKey=null;
+      try {
+        if(osKeyReader) {
+          encodedKey=osKeyReader(KEYRING_SERVICE,account);
+        } else {
+          const addon=loadHostKeyringAddon(env,homeDir);
+          if(!addon?.Entry)throw new Error("missing keyring addon");
+          const entry=platform()==="linux"
+            ?new addon.Entry(KEYRING_SERVICE,account,{linux:{store:"secret-service"}})
+            :new addon.Entry(KEYRING_SERVICE,account);
+          encodedKey=entry.getPassword();
+        }
+      }catch {
+        throw Object.assign(new Error("凭据解密失败：无法读取系统凭据库主密钥"),{reasonCode:"credentials_decrypt_failed"});
+      }
+      if(typeof encodedKey!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(encodedKey)) {
+        throw Object.assign(new Error("凭据解密失败：系统凭据库主密钥缺失或格式无效"),{reasonCode:"credentials_decrypt_failed"});
+      }
+      key=Buffer.from(encodedKey,"base64url");
+    }
+    if(key.length!==32||keyFingerprint(key)!==expectedFp) {
+      throw Object.assign(new Error("凭据解密失败：主密钥指纹不匹配"),{reasonCode:"credentials_decrypt_failed"});
+    }
+    return openGcmEnvelope(envelope,key)||null;
+  }
+  if(stored.startsWith("enc:")) {
+    throw Object.assign(new Error("不支持的凭据密文版本"),{reasonCode:"credentials_invalid"});
+  }
+  return stored.trim()||null;
 }
 
 export async function readCredentials(credentialsPath,env=process.env) {
@@ -319,7 +434,7 @@ export async function loadHostCatalog({env=process.env,homeDir=homedir()}={}) {
   if(credentials) {
     for(const [family,key] of [["bigmodel","oauth:bigmodel:access_token"],["zai","oauth:zai:access_token"]]) {
       try {
-        if(decryptCredentialValue(credentials[key],env))entitledFamilies.add(family);
+        if(decryptCredentialValue(credentials[key],env,{credentialsPath,homeDir}))entitledFamilies.add(family);
       }catch {}
     }
   }
@@ -371,6 +486,7 @@ export async function loadHostCatalog({env=process.env,homeDir=homedir()}={}) {
     if(!SUPPORTED_API_TYPES.has(apiType)||!baseUrl)continue;
 
     let teamLocation=null;
+    let resolvedApiKey=null;
     if(cfg.access?.type==="zhipu-account") {
       if(!SELECTABLE_ACCOUNT_MODES.has(cfg.access.mode))continue;
       if(!entitledFamilies.has(cfg.access.accountType))continue;
@@ -383,6 +499,8 @@ export async function loadHostCatalog({env=process.env,homeDir=homedir()}={}) {
       if(rule.enabled===false)continue;
       const apiKey=cfg.access?.apiKey;
       if(typeof apiKey!=="string"||!apiKey.trim())continue;
+      try {resolvedApiKey=decryptCredentialValue(apiKey,env,{credentialsPath,homeDir});}catch {resolvedApiKey=null;}
+      if(!resolvedApiKey)continue;
     }
 
     const modelIds=normalizeModelOrder(cfg.builtinModelIds??[],cfg.personalModelIds??[],cfg.modelOrder??[]);
@@ -409,7 +527,7 @@ export async function loadHostCatalog({env=process.env,homeDir=homedir()}={}) {
         api:{type:apiType,baseUrl,...(cfg.api?.headers?{headers:cfg.api.headers}:{})},
         access:cfg.access?.type==="zhipu-account"
           ?{type:"zhipu-account",accountType:cfg.access.accountType,mode:cfg.access.mode,...(teamLocation?{teamLocation}:{})}
-          :{type:cfg.access.type??"api-key",apiKey:cfg.access.apiKey.trim()}
+          :{type:cfg.access.type??"api-key",apiKey:resolvedApiKey}
       },
       models
     });

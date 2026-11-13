@@ -241,3 +241,31 @@ test("decryptCredentialValue：enc:v1 加解密往返一致",()=>{
   assert.equal(decryptCredentialValue(enc,env),"secret-jwt");
   assert.throws(()=>decryptCredentialValue(enc,{ZCODE_CREDENTIAL_SECRET:"wrong"}),{reasonCode:"credentials_decrypt_failed"});
 });
+
+test("decryptCredentialValue：支持宿主新版 enc:v2:os / enc:v2:env 密文且拒绝未知 enc: 前缀",()=>{
+  const rawKey=randomBytes(32);
+  const fp=createHash("sha256").update(rawKey).digest("hex").slice(0,24);
+  const iv=randomBytes(12);
+  const cipher=createCipheriv("aes-256-gcm",rawKey,iv);
+  const ct=Buffer.concat([cipher.update("v2-os-jwt","utf8"),cipher.final()]);
+  const sealed=`${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${ct.toString("base64url")}`;
+  const v2Os=`enc:v2:os:${fp}:${sealed}`;
+
+  assert.equal(
+    decryptCredentialValue(v2Os,{},{
+      credentialsPath:"D:\\v2\\credentials.json",
+      osKeyReader:()=>rawKey.toString("base64url")
+    }),
+    "v2-os-jwt"
+  );
+
+  const envSecret="managed-secret-at-least-32-bytes-long!!";
+  const envKey=createHash("sha256").update(envSecret).digest();
+  const envFp=createHash("sha256").update(envKey).digest("hex").slice(0,24);
+  const c2=createCipheriv("aes-256-gcm",envKey,iv);
+  const ct2=Buffer.concat([c2.update("v2-env-jwt","utf8"),c2.final()]);
+  const v2Env=`enc:v2:env:${envFp}:${iv.toString("base64url")}.${c2.getAuthTag().toString("base64url")}.${ct2.toString("base64url")}`;
+  assert.equal(decryptCredentialValue(v2Env,{ZCODE_CREDENTIAL_SECRET:envSecret}),"v2-env-jwt");
+
+  assert.throws(()=>decryptCredentialValue("enc:v99:unknown",{}),{reasonCode:"credentials_invalid"});
+});

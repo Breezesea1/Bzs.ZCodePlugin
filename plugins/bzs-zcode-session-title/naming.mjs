@@ -51,8 +51,8 @@ export async function runNaming({backend,selection,state={},apply=false,eventUse
   if(before.titlePolicy?.locked)return{status:"locked",title:before.title};
   if(before.titlePolicy)delete state.locked;
   if(state.locked)return{status:"locked",title:before.title};
-  // 标题变化且非宿主自动生成（generated）才视为用户手动改名并锁定
-  if(!before.titlePolicy&&state.lastFingerprint&&state.lastTitle!==before.title&&before.titleSource!=="generated") {
+  // 标题变化且非宿主自动生成（generated），或会话在插件介入前已被用户手动改名，均锁定让位
+  if(!before.titlePolicy&&(before.manualOverride||(state.lastFingerprint&&state.lastTitle!==before.title&&before.titleSource!=="generated"))) {
     if(apply)await backend.saveState({...state,locked:true,lastTitle:before.title});
     return{status:"manual_title",title:before.title};
   }
@@ -78,7 +78,14 @@ export async function runNaming({backend,selection,state={},apply=false,eventUse
       for(const [key,value] of Object.entries(generated.usage))merged[key]=(merged[key]??0)+value;
       generated.usage=merged;
     }
-    candidate=candidateFrom(generated,before.title,{...options,requireFormat:true});
+    try {
+      candidate=candidateFrom(generated,before.title,{...options,requireFormat:true});
+    }catch(retryError) {
+      // 纯问候/信息不足（如仅发送 hello）时 prompt 要求模型保持 keep 不臆造对象；二次仍确认 keep 则保留原标题待下轮再命名
+      if(retryError.code!=="invalid_keep_title")throw retryError;
+      const parsed=JSON.parse(generated.text);
+      candidate={action:"keep",title:before.title,reason:parsed.reason};
+    }
   }
   const result={status:"preview",action:candidate.action,title:candidate.title,reason:candidate.reason,usage:generated.usage};
   if(!apply)return result;
@@ -91,7 +98,7 @@ export async function runNaming({backend,selection,state={},apply=false,eventUse
   if(staleReason)return{status:"stale_result",staleReason,title:fresh.title,usage:generated.usage};
   if(candidate.action==="rename"&&candidate.title!==fresh.title) {
     await backend.saveState({...state,pendingTitle:candidate.title,pendingFingerprint:before.fingerprint});
-    await backend.rename(candidate.title);
+    await backend.rename(candidate.title,fresh.title);
     const verified=await backend.read();
     if(verified.title!==candidate.title)throw new Error("原宿主改名后读回不一致");
     result.status="renamed";

@@ -44,6 +44,8 @@ export function createBackend({event,config,saveState,prompt,generate=generateTe
         // 标题按 UI 同款解析：cli_title 是外部写入位，宿主镜像 title 列有延迟窗口
         title:displayTitleOf(row)??history.session.title,
         titleSource:row?.cliTitleSource??history.session.titleSource??null,
+        // 插件只写 tasks-index 不改 session.title_source；session.titleSource==='custom' 或 handoff_pending bit2=1 必为用户手动改名
+        manualOverride:history.session.titleSource==="custom"||((row?.handoffPending??0)&2)!==0,
         titlePolicy:await readTitlePolicy({sessionId,directory:config.titlePolicyDirectory}),
         archived:!!row?.archived,deleted:!!row?.deleted,running:row?.taskStatus==="running"
       };
@@ -75,10 +77,10 @@ export function createBackend({event,config,saveState,prompt,generate=generateTe
         env
       });
     },
-    async rename(title) {
+    async rename(title,expectedTitle) {
       const ws=await resolveWorkspace();
-      const updated=taskstore.renameTask({dbPath:config.indexDb,sessionId,workspacePath:ws,title});
-      if(!updated)throw new Error("任务索引中没有目标会话行，改名未生效");
+      const updated=taskstore.renameTask({dbPath:config.indexDb,sessionId,workspacePath:ws,title,expectedTitle});
+      if(!updated)throw new Error("任务索引中没有目标会话行或标题已被手动接管，改名未生效");
     },
     saveState,
     close() {taskstore.close();}

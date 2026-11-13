@@ -53,7 +53,7 @@ export function sessionExistsInSessionDb({dbPath,sessionId}) {
 // cli_title 是外部进程的写入位：宿主镜像 title 列有延迟窗口，读回校验须读自己的写入。
 export function loadIndexRow({dbPath,sessionId}) {
   try {
-    return queryAll(dbPath,"SELECT task_id,workspace_path,title,title_overridden AS titleOverridden,cli_title AS cliTitle,cli_title_source AS cliTitleSource,archived,deleted,task_status AS taskStatus FROM tasks WHERE task_id=?",[sessionId])[0]??null;
+    return queryAll(dbPath,"SELECT task_id,workspace_path,title,title_overridden AS titleOverridden,cli_title AS cliTitle,cli_title_source AS cliTitleSource,handoff_pending AS handoffPending,archived,deleted,task_status AS taskStatus FROM tasks WHERE task_id=?",[sessionId])[0]??null;
   } catch {return null;}
 }
 

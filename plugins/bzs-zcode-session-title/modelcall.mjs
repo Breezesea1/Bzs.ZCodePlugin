@@ -18,7 +18,7 @@ export async function loadAccountLoginToken(accountType,credentialsPath=join(hom
   if(!parsed)throw Object.assign(new Error("凭据文件不存在："+credentialsPath),{reasonCode:"credentials_missing"});
   const stored=parsed[endpoint.oauthKey];
   if(typeof stored!=="string"||!stored)throw Object.assign(new Error(`凭据中缺少 ${endpoint.oauthKey}`),{reasonCode:"credentials_missing"});
-  const plain=decryptCredentialValue(stored,env);
+  const plain=decryptCredentialValue(stored,env,{credentialsPath});
   if(!plain)throw Object.assign(new Error("解密后凭据为空"),{reasonCode:"credentials_invalid"});
   return plain;
 }
@@ -32,6 +32,13 @@ async function fetchJson(url,options,fetchImpl=fetch) {
   try {body=text?JSON.parse(text):null;}catch {body=null;}
   if(!response.ok||!body) {
     throw Object.assign(new Error(`请求失败 HTTP ${response.status}：${text.slice(0,200)}`),{reasonCode:"model_http_error",httpStatus:response.status});
+  }
+  if(body.success===false) {
+    const authFailed=body.code===401||body.code===403||body.code==="401"||body.code==="403";
+    throw Object.assign(
+      new Error(`接口返回错误（code=${body.code??"unknown"}）：${body.msg??body.message??"请求被拒绝"}`),
+      {reasonCode:authFailed?"credentials_invalid":"model_http_error",httpStatus:response.status}
+    );
   }
   return body;
 }
