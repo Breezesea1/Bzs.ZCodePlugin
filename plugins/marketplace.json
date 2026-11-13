@@ -10,9 +10,9 @@
       "source": "./bzs-zcode-session-title",
       "version": "0.5.2",
       "description": "Auto-summarize each conversation turn and rename the session title, supporting any model and reasoning level configured in host ZCode.",
-      "displayName": "Bzs Session Title",
+      "displayName": "Headline",
       "displayName_i18n": {
-        "zh-CN": "会话自动总结命名"
+        "zh-CN": "Headline"
       },
       "description_i18n": {
         "zh-CN": "会话自动总结与重命名：每轮对话结束后总结会话内容并更新标题，支持自由配置宿主 ZCode 中的任意可用模型与思考档位"
@@ -23,13 +23,13 @@
       "name": "bzs-token-speed",
       "source": "./bzs-token-speed",
       "version": "0.2.2",
-      "description": "Inline per-session token speed (tok/s) chip in the ZCode composer toolbar, with sparkline, Matrix-style dashboard and MCP query tools.",
-      "displayName": "Token Speed",
+      "description": "Inline per-session token speed (tok/s) chip in the ZCode composer toolbar, with sparkline and MCP query tools.",
+      "displayName": "TokenPulse",
       "displayName_i18n": {
-        "zh-CN": "Token 速度监视"
+        "zh-CN": "TokenPulse"
       },
       "description_i18n": {
-        "zh-CN": "在 ZCode 输入框工具栏内联显示当前会话 token 速度（tok/s）与走势线；另附 Matrix 风格实时仪表盘与 MCP 查询工具"
+        "zh-CN": "在 ZCode 输入框工具栏内联显示当前会话 token 速度（tok/s）与走势线；附 MCP 查询工具"
       },
       "category": "developer-tools"
     }
