@@ -1,7 +1,7 @@
 {
   "name": "bzs-token-speed",
-  "version": "0.2.2",
-  "description": "在 ZCode 输入框工具栏内联显示当前会话 token 速度（tok/s）与走势线；附 MCP 查询工具",
+  "version": "0.3.0",
+  "description": "TokenPulse：在 ZCode 输入框工具栏内联显示当前会话实时速率、逐请求走势线与详情悬浮面板；附 MCP 查询工具",
   "author": { "name": "Bzs" },
   "license": "MIT",
   "mcpServers": ".mcp.json",

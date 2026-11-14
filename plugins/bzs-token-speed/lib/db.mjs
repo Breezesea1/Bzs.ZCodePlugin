@@ -14,14 +14,21 @@ const DB_CANDIDATES = () =>
   ].filter(Boolean);
 
 let connection = null;
+let openDbPath = null;
 
 export function dbFilePath() {
   return DB_CANDIDATES().find((p) => existsSync(p)) ?? null;
 }
 
 export function connect() {
-  if (connection) return connection;
   const path = dbFilePath();
+  if (connection && openDbPath === path) return connection;
+  if (connection) {
+    try {
+      connection.close();
+    } catch {}
+    connection = null;
+  }
   if (!path) {
     const err = new Error(
       `session db not found (tried: ${DB_CANDIDATES().join(", ")})`
@@ -33,6 +40,7 @@ export function connect() {
     readOnly: true,
     enableForeignKeyConstraints: false,
   });
+  openDbPath = path;
   connection.exec("PRAGMA busy_timeout = 3000");
   return connection;
 }
@@ -40,6 +48,7 @@ export function connect() {
 export function close() {
   connection?.close();
   connection = null;
+  openDbPath = null;
 }
 
 // ---- queries ---------------------------------------------------------------
@@ -68,7 +77,7 @@ export function findInteractiveSessions({ directories, sinceMs, limit }) {
            AND (directory IN (${placeholders}) OR path IN (${placeholders}))
          ORDER BY time_updated DESC LIMIT ${Number(limit)}`
       )
-      .all(...directories);
+      .all(...directories, ...directories);
   }
   return db
     .prepare(
@@ -96,14 +105,39 @@ export function completedRequestsForSession(sessionId, limit) {
   return connect()
     .prepare(
       `SELECT started_at, first_token_at, completed_at, duration_ms,
+              time_to_first_token_ms,
               output_tokens, input_tokens, cache_read_input_tokens,
               cache_creation_input_tokens, reasoning_tokens,
-              model_id, query_source, finish_reason
+              provider_id, model_id, query_source, finish_reason, tool_call_count
        FROM model_usage
        WHERE session_id = ? AND status = 'completed'
-       ORDER BY completed_at DESC LIMIT ?`
+       ORDER BY completed_at DESC, id DESC LIMIT ${Number(limit)}`
     )
-    .all(sessionId, limit);
+    .all(sessionId);
+}
+
+export function latestMessageWithParts(sessionId) {
+  const db = connect();
+  const msg =
+    db
+      .prepare(
+        `SELECT id, time_created, time_updated, data
+         FROM message
+         WHERE session_id = ?
+         ORDER BY sequence DESC, time_created DESC, id DESC
+         LIMIT 1`
+      )
+      .get(sessionId) ?? null;
+  if (!msg) return null;
+  const parts = db
+    .prepare(
+      `SELECT id, sequence, time_created, time_updated, data
+       FROM part
+       WHERE message_id = ?
+       ORDER BY sequence ASC, time_created ASC, id ASC`
+    )
+    .all(msg.id);
+  return { message: msg, parts };
 }
 
 export function sessionsWithTrafficSince(sinceMs, limit) {
@@ -116,7 +150,7 @@ export function sessionsWithTrafficSince(sinceMs, limit) {
        FROM model_usage mu JOIN session s ON s.id = mu.session_id
        WHERE COALESCE(mu.completed_at, mu.started_at) > ? AND s.time_deleted IS NULL
        GROUP BY mu.session_id
-       ORDER BY last_ms DESC LIMIT ?`
+       ORDER BY last_ms DESC LIMIT ${Number(limit)}`
     )
-    .all(sinceMs, limit);
+    .all(sinceMs);
 }

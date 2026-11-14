@@ -22,14 +22,14 @@
     {
       "name": "bzs-token-speed",
       "source": "./bzs-token-speed",
-      "version": "0.2.2",
-      "description": "Inline per-session token speed (tok/s) chip in the ZCode composer toolbar, with sparkline and MCP query tools.",
+      "version": "0.3.0",
+      "description": "Inline per-session token speed (tok/s) pill in the ZCode composer toolbar, with real-time streaming status, trajectory sparkline, interactive HUD popover and MCP query tools.",
       "displayName": "TokenPulse",
       "displayName_i18n": {
         "zh-CN": "TokenPulse"
       },
       "description_i18n": {
-        "zh-CN": "在 ZCode 输入框工具栏内联显示当前会话 token 速度（tok/s）与走势线；附 MCP 查询工具"
+        "zh-CN": "在 ZCode 输入框工具栏内联显示当前会话实时速率（tok/s）、逐请求走势线与交互式详情面板；附 MCP 查询工具"
       },
       "category": "developer-tools"
     }

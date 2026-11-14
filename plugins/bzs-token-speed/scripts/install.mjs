@@ -1,17 +1,12 @@
-// Install: inject the composer chip into ZCode's renderer (app.asar) and
-// record how to reach the token-speed HTTP host.
+// Install: inject the TokenPulse composer chip into ZCode's renderer (app.asar)
+// and record how to reach the loopback HTTP host.
 //
 // Usage: node install.mjs [--port <port>] [--base <url>] [--dry-run] [--force]
-//   --port/--base  override the endpoint; default auto-discovery handles it
-//   --dry-run      verify and report without writing
-//   --force        re-inject even when a previous injection was detected
-//
-// The endpoint is baked into the renderer as a <meta> tag. install.mjs reads
-// the freshest port from http-port.json (written by the MCP process on boot)
-// and embeds it, so changing the port only needs a re-run of this script.
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+// Also exported as `ensureInstalled()` so the MCP server can self-heal after
+// ZCode updates or plugin upgrades without manual CLI intervention.
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   readFileFromAsar,
   buildAsarWithReplacedFile,
@@ -21,10 +16,14 @@ import {
   APP_ASAR,
   BACKUP_ASAR,
   STATE_FILE,
+  PORT_FILE,
+  PREFERRED_PORT,
   RENDERER_INDEX,
+  computeChipVersionTag,
   injectSnippet,
   stripInjection,
   hasInjection,
+  extractInjectedMeta,
 } from "./lib/target.mjs";
 
 const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -42,90 +41,158 @@ function parseArgs(argv) {
   return out;
 }
 
-function chipSource(baseUrl) {
-  const raw = readFileSync(CHIP_PATH, "utf8");
-  // The chip is authored as a plain module body; strip the export-free IIFE
-  // wrapper is unnecessary — it is already self-invoking and side-effect only.
-  // Discover the endpoint from the injected meta tag instead of baking it in.
-  return raw;
+function readZCodeVersion(asarPath) {
+  try {
+    const raw = readFileFromAsar(asarPath, "package.json").toString("utf8");
+    return JSON.parse(raw).version ?? null;
+  } catch {
+    return null;
+  }
 }
 
-function htmlWithEndpoint(html, baseUrl) {
-  // The chip reads data-bzs-token-speed-base from <html>; a dedicated meta
-  // keeps that attribute free for other uses.
-  const meta = `<meta name="bzs-token-speed-base" content="${baseUrl}">`;
-  return html.replace(/<head([^>]*)>/i, (m) => `${m}\n    ${meta}`);
+function readSavedState() {
+  if (!existsSync(STATE_FILE)) return null;
+  try {
+    return JSON.parse(readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return null;
+  }
 }
 
-async function main() {
-  const args = parseArgs(process.argv.slice(2));
-  const indexHtml = readFileFromAsar(APP_ASAR, RENDERER_INDEX).toString("utf8");
-
-  const report = { appAsar: APP_ASAR, dryRun: args.dryRun };
-  const { html: stripped, hadInjection } = stripInjection(indexHtml);
-  report.previousInjection = hadInjection;
-  if (hasInjection(stripped)) {
-    throw new Error("injection markers present without begin marker; refusing to edit");
-  }
-  if (hadInjection && !args.force && !args.dryRun) {
-    // Re-injection is the normal update path; markers make it idempotent.
-  }
-
-  // Resolve the chip endpoint: explicit --base wins, else --port, else a
-  // discovery URL the chip resolves at runtime (loopback scan is avoided;
-  // default expects the HTTP host on the well-known discovery file).
-  let base = args.base ?? null;
-  if (!base && args.port) base = `http://127.0.0.1:${args.port}`;
-
-  // Endpoint discovery: the MCP process writes its port here on every boot,
-  // and install embeds the freshest known value. The chip also re-checks this
-  // file every 30s in case the port changed after a ZCode restart.
-  const discoveryPath = join(dirname(STATE_FILE), "http-port.json");
-  let portFromFile = null;
-  if (!base && existsSync(discoveryPath)) {
+function resolveEndpoint({ base, port } = {}) {
+  if (base) return base;
+  if (port) return `http://127.0.0.1:${port}`;
+  if (existsSync(PORT_FILE)) {
     try {
-      portFromFile = JSON.parse(readFileSync(discoveryPath, "utf8")).port ?? null;
-    } catch {
-      portFromFile = null;
-    }
+      const p = JSON.parse(readFileSync(PORT_FILE, "utf8")).port;
+      if (Number.isInteger(p) && p > 0) return `http://127.0.0.1:${p}`;
+    } catch {}
   }
-  if (!base && portFromFile) base = `http://127.0.0.1:${portFromFile}`;
-  if (!base) {
-    throw new Error(
-      "no endpoint known: start ZCode with the plugin installed once (it writes http-port.json), or pass --port"
-    );
-  }
-  report.endpoint = base;
+  return `http://127.0.0.1:${PREFERRED_PORT}`;
+}
 
-  const chip = chipSource(base);
+function htmlWithMeta(html, baseUrl, versionTag) {
+  const metas = [
+    `<meta name="bzs-token-speed-base" content="${baseUrl}">`,
+    `<meta name="bzs-token-speed-version" content="${versionTag}">`,
+  ].join("\n    ");
+  return html.replace(/<head([^>]*)>/i, (m) => `${m}\n    ${metas}`);
+}
+
+export function ensureInstalled({
+  base: explicitBase,
+  port,
+  dryRun = false,
+  force = false,
+  asarPath = APP_ASAR,
+} = {}) {
+  if (!existsSync(asarPath)) {
+    return { appAsar: asarPath, installed: false, skipped: "asar_not_found" };
+  }
+
+  const chip = readFileSync(CHIP_PATH, "utf8");
+  const versionTag = computeChipVersionTag(chip);
+  const base = resolveEndpoint({ base: explicitBase, port });
+  const zcodeVersion = readZCodeVersion(asarPath);
+  const indexHtml = readFileFromAsar(asarPath, RENDERER_INDEX).toString("utf8");
+  const existingMeta = extractInjectedMeta(indexHtml);
+
+  // Fast path: already injected with the exact current chip hash & endpoint.
+  if (
+    !force &&
+    hasInjection(indexHtml) &&
+    existingMeta.versionTag === versionTag &&
+    existingMeta.endpoint === base
+  ) {
+    return {
+      appAsar: asarPath,
+      zcodeVersion,
+      versionTag,
+      endpoint: base,
+      upToDate: true,
+      installed: false,
+    };
+  }
+
+  const { html: stripped, hadInjection } = stripInjection(indexHtml);
+  if (hasInjection(stripped)) {
+    throw new Error("injection markers unbalanced; refusing to edit");
+  }
+
   const snippet = injectSnippet(chip);
   let nextHtml = stripped.replace(/<\/body>/i, `${snippet}\n  </body>`);
-  nextHtml = htmlWithEndpoint(nextHtml, base);
+  nextHtml = htmlWithMeta(nextHtml, base, versionTag);
+
+  const report = {
+    appAsar: asarPath,
+    zcodeVersion,
+    versionTag,
+    dryRun,
+    previousInjection: hadInjection,
+    endpoint: base,
+  };
 
   const { archive } = buildAsarWithReplacedFile(
-    APP_ASAR,
+    asarPath,
     RENDERER_INDEX,
     Buffer.from(nextHtml, "utf8")
   );
   report.newSize = archive.length;
 
-  if (!args.dryRun) {
-    installArchive(APP_ASAR, archive, { backupPath: BACKUP_ASAR });
-    mkdirSync(dirname(STATE_FILE), { recursive: true });
-    writeFileSync(
-      STATE_FILE,
-      JSON.stringify(
-        { installedAt: new Date().toISOString(), endpoint: base, chipBytes: chip.length },
-        null,
-        2
-      )
-    );
+  if (!dryRun) {
+    const prevState = readSavedState();
+    // Discard stale full-archive backup if ZCode upgraded to a different version.
+    if (
+      asarPath === APP_ASAR &&
+      existsSync(BACKUP_ASAR) &&
+      prevState?.zcodeVersion !== zcodeVersion
+    ) {
+      rmSync(BACKUP_ASAR, { force: true });
+    }
+    // Only capture backup from a clean (non-injected) archive so we never overwrite
+    // a clean backup with an already-injected archive.
+    const saveBackup = asarPath === APP_ASAR && !hadInjection;
+    installArchive(asarPath, archive, {
+      backupPath: asarPath === APP_ASAR ? BACKUP_ASAR : null,
+      saveBackup,
+    });
+    if (asarPath === APP_ASAR) {
+      mkdirSync(dirname(STATE_FILE), { recursive: true });
+      writeFileSync(
+        STATE_FILE,
+        JSON.stringify(
+          {
+            installedAt: new Date().toISOString(),
+            zcodeVersion,
+            versionTag,
+            endpoint: base,
+            chipBytes: chip.length,
+          },
+          null,
+          2
+        )
+      );
+    }
   }
-  report.installed = !args.dryRun;
-  console.log(JSON.stringify(report, null, 2));
+
+  report.installed = !dryRun;
+  return report;
 }
 
-main().catch((error) => {
-  console.error(`bzs-token-speed install failed: ${error.message}`);
-  process.exit(1);
-});
+const isMain =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMain) {
+  (async () => {
+    const args = parseArgs(process.argv.slice(2));
+    const report = ensureInstalled(args);
+    if (!args.dryRun) {
+      const { ensureHttpDaemon } = await import("../server/http.mjs");
+      report.daemon = await ensureHttpDaemon();
+    }
+    console.log(JSON.stringify(report, null, 2));
+  })().catch((error) => {
+    console.error(`bzs-token-speed install failed: ${error.message}`);
+    process.exit(1);
+  });
+}

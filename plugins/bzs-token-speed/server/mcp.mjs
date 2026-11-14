@@ -1,16 +1,17 @@
-// MCP stdio transport: JSON-RPC 2.0 framing implemented by hand to avoid
-// shipping a dependency tree into the plugin cache. Tools are thin wrappers
-// over the service layer; all formatting lives beside the tool definitions.
+// MCP stdio transport: JSON-RPC 2.0 framing implemented by hand with zero
+// external dependencies. Also boots the loopback HTTP host and self-heals the
+// renderer chip injection if a ZCode client update overwrote app.asar.
 import { pathToFileURL } from "node:url";
-import { startHttpHost } from "./http.mjs";
+import { ensureHttpDaemon } from "./http.mjs";
+import { ensureInstalled } from "../scripts/install.mjs";
+import { PLUGIN_VERSION } from "../scripts/lib/target.mjs";
 import {
   currentSpeedSnapshot,
-  sessionSpeedSnapshot,
   activeSessions,
 } from "../lib/service.mjs";
 
 const SERVER_NAME = "bzs-token-speed";
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = PLUGIN_VERSION;
 const PROTOCOL_VERSION = "2024-11-05";
 
 const fmtSpd = (v) => (v == null ? "—" : v.toFixed(1));
@@ -22,6 +23,19 @@ const fmtTok = (v) =>
       : v >= 1e3
         ? `${(v / 1e3).toFixed(1)}K`
         : String(v);
+
+const MODE_LABEL = {
+  stream: "流式解码",
+  "vis-stream": "思考后流式",
+  e2e: "端到端吞吐",
+};
+
+const PHASE_LABEL = {
+  thinking: "思考中",
+  streaming: "流式输出中",
+  tool: "工具执行中",
+  idle: "空闲",
+};
 
 function text(result, isError = false) {
   return { content: [{ type: "text", text: result }], ...(isError ? { isError } : {}) };
@@ -36,34 +50,54 @@ function resolveArgs(args = {}) {
 
 function speedText(args) {
   const snap = currentSpeedSnapshot(resolveArgs(args));
-  if (!snap.session.id) {
+  if (!snap.session.id || snap.session.id === "draft") {
     return text("未找到活跃会话：数据库中没有 30 分钟内有活动的交互式会话。", true);
   }
   const m = snap.metrics;
-  if (!m?.hasData) {
+  const live = snap.live;
+  if (!m?.hasData && !live?.active) {
     return text(`会话 ${snap.session.id}（${snap.session.title ?? "无标题"}）\n该会话暂无已完成的模型请求。`);
   }
-  const s = m.speed;
-  const idle = m.secondsSinceLastRequest;
-  const state = m.streaming ? "流式进行中" : idle == null ? "暂无请求" : `空闲 ${fmtSpd(idle)}s`;
-  const latest = s.latest
-    ? `${fmtSpd(s.latest.tokPerSec)} tok/s（${s.latest.outputTokens} tok / ${(s.latest.genMs / 1000).toFixed(1)}s，${s.latest.model ?? "—"}）`
+
+  const s = m?.speed;
+  const idle = m?.secondsSinceLastRequest;
+  const stateLabel = live?.active
+    ? `${PHASE_LABEL[live.phase] ?? live.phase}${live.liveTokPerSec != null ? `（实时 ~${fmtSpd(live.liveTokPerSec)} tok/s）` : ""}`
+    : m?.streaming
+      ? "刚完成输出"
+      : idle == null
+        ? "暂无请求"
+        : `空闲 ${fmtSpd(idle)}s`;
+
+  const latest = s?.latest
+    ? `${fmtSpd(s.latest.tokPerSec)} tok/s [${MODE_LABEL[s.latest.mode] ?? s.latest.mode}]（输出 ${s.latest.outputTokens} tok${s.latest.reasoningTokens > 0 ? `，含思考 ${s.latest.reasoningTokens}` : ""} / ${(s.latest.genMs / 1000).toFixed(1)}s，${s.latest.model ?? "—"}）`
     : "—";
+
+  const ttftStr =
+    m?.ttft.avgMs != null
+      ? `${(m.ttft.avgMs / 1000).toFixed(2)}s`
+      : m?.ttft.avgFirstVisibleMs != null
+        ? `${(m.ttft.avgFirstVisibleMs / 1000).toFixed(1)}s（含前置思考）`
+        : "—";
+
+  const cacheHitStr =
+    m?.cacheHitRatio != null ? `${(m.cacheHitRatio * 100).toFixed(1)}%` : "—";
+
   return text(
     [
       `会话 ${snap.session.id} · ${snap.session.title ?? "(无标题)"}`,
-      `识别方式：${snap.session.resolvedBy}；状态：${state}`,
+      `识别方式：${snap.session.resolvedBy}；状态：${stateLabel}`,
       ``,
-      `⚡ 解码速度`,
+      `⚡ TokenPulse 速率`,
       `  最新请求：${latest}`,
-      `  近 10 分钟加权：${fmtSpd(s.recent10m)} tok/s（${s.recentCount} 次请求）`,
-      `  会话全程加权：${fmtSpd(s.overall)} tok/s`,
-      `  峰值：${fmtSpd(s.peak?.tokPerSec)} tok/s`,
-      `  平均 TTFT（首 token 延迟）：${m.ttft.avgMs == null ? "—" : `${(m.ttft.avgMs / 1000).toFixed(1)}s`}`,
+      `  近 10 分钟加权：${fmtSpd(s?.recent10m)} tok/s（${s?.recentCount ?? 0} 次请求）`,
+      `  会话全程加权：${fmtSpd(s?.overall)} tok/s`,
+      `  峰值：${fmtSpd(s?.peak?.tokPerSec)} tok/s`,
+      `  首字延迟 TTFT：${ttftStr}`,
       ``,
-      `📦 Token 用量`,
-      `  输出 ${fmtTok(m.totals.outputTokens)} ｜ 输入 ${fmtTok(m.totals.inputTokens)} ｜ 缓存读 ${fmtTok(m.totals.cacheReadTokens)} ｜ 缓存写 ${fmtTok(m.totals.cacheCreationTokens)} ｜ 推理 ${fmtTok(m.totals.reasoningTokens)}`,
-      `  请求 ${m.requestCount} 次 ｜ 模型分布：${Object.entries(m.models).map(([mod, n]) => `${mod}×${n}`).join("，")}`,
+      `📦 Token 与缓存`,
+      `  输出 ${fmtTok(m?.totals.outputTokens)}（推理 ${fmtTok(m?.totals.reasoningTokens)}）｜ 输入 ${fmtTok(m?.totals.inputTokens)} ｜ 缓存命中 ${cacheHitStr}（读 ${fmtTok(m?.totals.cacheReadTokens)}）`,
+      `  请求 ${m?.requestCount ?? 0} 次 ｜ 模型分布：${Object.entries(m?.models ?? {}).map(([mod, n]) => `${mod}×${n}`).join("，") || "—"}`,
     ].join("\n")
   );
 }
@@ -108,7 +142,7 @@ const TOOLS = [
   {
     name: "token_speed_detail",
     description:
-      "返回当前会话 token 速度的原始结构化数据（JSON）：逐请求速度样本、TTFT 列表、缓存命中、按 query_source 分布等，用于深入分析或绘图。",
+      "返回当前会话 token 速度的原始结构化数据（JSON）：逐请求速度样本、实时流式状态、TTFT、缓存命中率、按 query_source 分布等，用于深入分析或绘图。",
     inputSchema: {
       type: "object",
       properties: {
@@ -195,10 +229,9 @@ export async function readStdin(stdin = process.stdin, stdout = process.stdout) 
   }
 }
 
-// Start listening only when actually driven over stdio; direct invocation runs
-// a self-test so the module can be smoke-tested without an MCP client.
 const isMain =
   process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
 if (isMain && process.env.TOKEN_SPEED_SELFTEST === "1") {
   const snap = currentSpeedSnapshot({
     workingDir: process.env.ZCODE_PROJECT_DIR ?? process.cwd(),
@@ -216,10 +249,23 @@ if (isMain && process.env.TOKEN_SPEED_SELFTEST === "1") {
     )
   );
 } else if (isMain) {
-  // HTTP host starts with the process so the composer chip can always connect.
-  startHttpHost().catch((error) => {
-    process.stderr.write(`bzs-token-speed http host failed: ${error.message}\n`);
-  });
+  ensureHttpDaemon()
+    .then(() => {
+      if (process.env.TOKEN_SPEED_NO_AUTOINJECT === "1") return;
+      const timer = setTimeout(() => {
+        try {
+          ensureInstalled();
+        } catch (error) {
+          process.stderr.write(
+            `bzs-token-speed auto-inject skipped: ${error.message}\n`
+          );
+        }
+      }, 600);
+      timer.unref?.();
+    })
+    .catch((error) => {
+      process.stderr.write(`bzs-token-speed http host failed: ${error.message}\n`);
+    });
   readStdin().catch((error) => {
     process.stderr.write(`bzs-token-speed fatal: ${error.message}\n`);
     process.exit(1);

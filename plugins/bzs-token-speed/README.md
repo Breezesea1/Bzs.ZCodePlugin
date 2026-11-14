@@ -1,69 +1,42 @@
-# bzs-token-speed
+# TokenPulse (`bzs-token-speed`)
 
-在 ZCode 输入框工具栏内联显示当前会话的 token 解码速度（tok/s）与 40 秒走势线。附 3 个 MCP 查询工具。
+在 ZCode 输入框工具栏内联显示当前会话的实时 token 速率（tok/s）、状态脉搏、逐请求走势线与交互式 HUD 悬浮详情面板；附 3 个零依赖 MCP 查询工具。
 
 ## 架构
 
 ```
 lib/
-  db.mjs          存储层：db.sqlite 只读访问（唯一知道 schema 的模块）
+  db.mjs          存储层：db.sqlite 只读访问（model_usage 历史 + message/part 实时流式）
   sessions.mjs    会话推断：显式 id > 目录匹配 > 全局最近
-  metrics.mjs     指标计算：纯函数，无 IO，now 注入
+  metrics.mjs     指标引擎：三模态速率消歧（stream / vis-stream / e2e）、实时流式检测、纯函数
   service.mjs     组合根：currentSpeedSnapshot / sessionSpeedSnapshot / activeSessions
 server/
-  http.mjs        传输层：loopback HTTP（/api/snapshot /api/board /api/ping），随进程启动
-  mcp.mjs         传输层：MCP stdio + 4 个工具（自实现 JSON-RPC，零依赖）
+  http.mjs        传输层：loopback HTTP（/api/snapshot?session=... /api/board /api/ping），支持端口 47816 自动接管
+  mcp.mjs         传输层：MCP stdio + 启动自愈注入检测
 composer/
-  chip.mjs        呈现层：注入 ZCode 渲染器的自包含芯片脚本（只管显示）
+  chip.mjs        呈现层：多窗格精确绑定 [data-session-id]、响应式折叠、逐请求走势线与悬浮/固定详情面板
 scripts/
-  lib/asar.mjs    asar 读写库：字节级替换单文件，其余文件原样保留
-  lib/target.mjs  注入标记与常量
-  install.mjs     注入芯片到 app.asar（自动备份，幂等）
-  uninstall.mjs   还原（优先用备份还原，逐字节一致）
-  status.mjs      查看注入状态与后端可达性
-
-skills/token-speed/SKILL.md  使用技能
+  lib/asar.mjs    asar 局部头读取与字节级单文件替换（兼容 Windows 运行时热写）
+  lib/target.mjs  注入标记、芯片版本哈希与清理逻辑
+  install.mjs     幂等注入 app.asar（同时供 MCP 启动自愈调用）
+  uninstall.mjs   跨版本安全原位剥离还原（绝不用旧版备份降级新版客户端）
+  status.mjs      查看注入状态、版本匹配度与后端可达性
+tests/
+  token-speed.test.mjs  核心指标消歧、实时流式状态、注入幂等与 HTTP/MCP 单元测试
 ```
 
-数据流：`db.sqlite → lib（引擎）→ server/http.mjs（每秒可拉取的 JSON）→ chip.mjs（1s 轮询渲染）`。
-MCP 工具走 `lib → server/mcp.mjs`，与 HTTP 共享引擎但不共享传输。
+## 核心特性
 
-## 速度口径
-
-- 单请求速度 = `output_tokens / ((completed_at − first_token_at)/1000)`；`first_token_at` 缺失回退 `duration_ms`；窗口 <50ms 或 0 token 的样本剔除。
-- 加权均值 = Σtokens / Σtime（不是算术平均）。
-- TTFT = `first_token_at − started_at`，与解码速度独立。
-- 行只在请求完成时写入，无 in-flight 数据；`streaming` 由"最新完成请求 <3s"近似。
-
-## 内联芯片原理（重要）
-
-ZCode 没有官方的底栏/statusline 扩展点（hook 事件枚举里没有 UI 事件；插件 UI bridge 只能渲染聊天流卡片）。芯片通过 `scripts/install.mjs` 把 `composer/chip.mjs` 注入 `app.asar` 里的 `out/renderer/index.html`：
-
-- 注入段用 `<!-- bzs-token-speed:begin/end -->` 标记包围，重复安装自动去旧换新。
-- 端点以 `<meta name="bzs-token-speed-base">` 写入同一文件；HTTP 服务启动时把端口写到 `resources/bzs-token-speed-backup/http-port.json`。多会话会各自拉起 MCP 进程，只有第一个占到固定端口 47816，其余回退随机端口——回退实例若探到固定端口有应答，就仍然记录 47816，避免把文件覆盖成随自己进程消失的临时端口。
-- 芯片复用 ZCode 自带 Tailwind 类（`h-7 rounded-lg text-foreground-subtle` 等），挂载点是 composer 工具栏 `[data-composer-leading-content]`（「完全访问」按钮同一行）。
-- Electron fuse `EnableEmbeddedAsarIntegrityValidation` 为关闭状态（已实测 3.16.3），否则此方案不可行。
-
-## 安装 / 更新 / 卸载
-
-1. 安装并启用本插件（ZCode 插件市场 → 本地市场）。
-2. 随便让插件 MCP 跑一次（如在会话里调用 `token_speed`），生成端口文件。
-3. `node plugins/bzs-token-speed/scripts/install.mjs`
-4. 重启 ZCode。芯片出现在输入框工具栏。
-
-更新插件后重跑 install.mjs（标记保证幂等）。卸载：先 `scripts/uninstall.mjs`，再在 UI 里移除插件。
-
-## 已验证（2026-10-30，ZCode 3.16.3）
-
-- MCP stdio 全链路（initialize/tools/list/4×tools/call）实测通过。
-- HTTP `/api/snapshot` `/api/board` `/api/ping` 带 CORS 头实测通过。
-- asar 替换往返：27772 个文件字节级 0 差异；install → status → uninstall 后与原始档逐字节一致。
-- 芯片在注入页面中点亮：数值、sparkline、tooltip、流式强调均正常（内置浏览器 DOM 审计）。
-- SQLite 只读连接（WAL）亚秒级可见新数据；路径必须用正斜杠。
-- `node:sqlite` 的 IN 列表 + LIMIT 混合参数绑定有怪癖（datatype mismatch），LIMIT 用内插数字规避。
-
-## 已知边界
-
-- 多窗口同时活跃时，芯片显示"目录 + 最近模型流量"推断出的冠军会话，tooltip 有会话号可核对。
-- ZCode 升级会重写 app.asar，需重跑 install.mjs（升级后先查 `PRAGMA table_info(model_usage)` 列名是否变化：`first_token_at/completed_at/output_tokens`）。
-- 若未来版本开启 asar 完整性校验 fuse，内联芯片方案失效，但 MCP 工具不受影响。
+1. **三模态速率消歧（拒绝虚高假峰值）**
+   - **`stream`（流式解码）**：首 token 即开始流式传输（含流式思考模型），按 `output_tokens / (completed_at - first_token_at)` 计算，并记录纯净网络/预填充 TTFT。
+   - **`vis-stream`（思考后流式）**：针对服务端静默完成 `reasoning_tokens` 后才打 `first_token_at` 并流式输出可见文本的场景，按 `(output_tokens - reasoning_tokens) / (completed_at - first_token_at)` 计算可见流式速率。
+   - **`e2e`（端到端吞吐）**：针对代理整包缓冲或思考数十秒后百毫秒内单包冲刷 tool-call JSON 的场景，回退 `output_tokens / duration_ms`，彻底消除上千 `tok/s` 的失真数值。
+2. **窗格级精确会话绑定与实时态反馈**
+   - 直接读取每个输入框所属会话容器的 `[data-session-id]`（支持分屏多窗格与新建 `draft` 会话隔离），切换会话即时切换数据。
+   - 结合 SQLite WAL 中的最新未完成 `message/part` 与渲染器 `[data-projection-seq]`，实时呈现 **思考中（含计时/流式速率）**、**流式输出**、**工具执行** 与 **空闲** 四种状态。
+3. **原生级 UI 与交互式详情 HUD**
+   - 完整复用 ZCode `--color-*` 主题语义变量（自适应深浅色主题）与 `data-composer-collapse-priority="extension"` 窄屏自动折叠协议。
+   - 悬停或点击芯片可展开/固定详情卡片：四维指标网格、最近 24 次请求逐根悬停柱状图、缓存命中进度条与推理/输入/输出用量汇总。
+4. **ZCode 升级自愈与跨版本安全卸载**
+   - MCP 服务启动时仅读取 `app.asar` 头部快速校验芯片哈希；若 ZCode 客户端升级覆盖了 `app.asar`，后台自动重新注入（刷新/重启一次窗口即生效）。
+   - `uninstall.mjs` 默认原位剥离注入片段，并自动清理跨版本的过期备份，杜绝旧版 `app.asar.orig` 覆盖新版客户端。

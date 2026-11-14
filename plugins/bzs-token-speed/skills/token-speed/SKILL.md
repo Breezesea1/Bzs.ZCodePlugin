@@ -3,33 +3,34 @@ name: token-speed
 description: 查看当前 ZCode 会话的 token 速度（tok/s）。当用户想看生成速度、解码速率、token/s、首字延迟 TTFT、缓存命中、模型流量统计，或报告输入框旁的速度芯片不显示/异常时使用。
 ---
 
-# Token Speed — 会话 token 速度观测
+# TokenPulse — 会话 Token 速率与流式观测
 
-速度芯片内联在 ZCode 输入框工具栏（「完全访问」按钮旁），每秒自动刷新，通常无需调用任何工具。MCP 工具用于深入查询。
+`TokenPulse` 芯片内联在每个 ZCode 会话输入框工具栏内，精确绑定所属窗格的 `data-session-id`，实时展示思考/流式/工具状态、逐请求速率走势线与交互式详情悬浮面板（悬停查看或点击固定）。MCP 工具用于对话内深入查询。
 
 ## 工具速查（服务器名 `bzs-token-speed`）
 
 | 工具 | 用途 |
 | --- | --- |
-| `token_speed` | 查询当前会话的速度摘要（人类可读文本） |
-| `token_speed_detail` | 返回完整结构化 JSON（逐请求样本，用于分析/绘图） |
+| `token_speed` | 查询当前会话的速度摘要、缓存命中率与实时状态（人类可读文本） |
+| `token_speed_detail` | 返回完整结构化 JSON（逐请求样本、解码模式分类、实时状态，用于分析/绘图） |
 | `token_speed_board` | 全局视角：列出近 1 小时有模型流量的全部会话 |
 
 ## 使用规则
 
-1. **"看看现在的 token 速度" / "速度多快"** → 直接调用 `token_speed`，把返回的速度数字、TTFT 和状态复述给用户。不要运行任何 shell 命令去读数据库——工具已经做了只读查询和统计。
-2. **需要原始数据画图、或用户要求"详细数据"** → 调用 `token_speed_detail` 并解析 JSON。速度口径：`output_tokens ÷ (completed_at − first_token_at)`，即解码速度；加权平均按 token 数加权而非算术平均。
+1. **"看看现在的 token 速度" / "速度多快"** → 直接调用 `token_speed`，把返回的速度数字、模式、TTFT、缓存命中率和状态复述给用户。无需用 shell 去读数据库。
+2. **需要原始数据画图、或用户要求"详细数据"** → 调用 `token_speed_detail` 并解析 JSON。
 3. **"其它会话" / "哪个会话最快" / "全局"** → 调用 `token_speed_board`。若用户点名某个会话，把其 `sessionId` 传入 `token_speed` 的 `session_id` 参数。
-4. **芯片排错**（用户报告"速度显示 —"或"芯片不见了"）：
-   - 芯片挂在输入框工具栏 `[data-composer-leading-content]` 内，靠 `composer/chip.mjs` 注入脚本渲染；该脚本由 `scripts/install.mjs` 写入 app.asar。
-   - 排错顺序：`node scripts/status.mjs` 查 `chipInjected` 与 `httpHostReachable`；两者都 true 仍异常时，让用户重启 ZCode（注入脚本只在渲染器启动时加载）。
-   - 修复/重装：先运行插件 MCP 任意工具（让 http-port.json 写入端口），再 `node scripts/install.mjs`。
-5. **数据口径说明**（回答用户追问时使用）：
-   - 速度只统计 `status='completed'` 的请求；单请求样本 `<50ms` 或 `0 token` 的被剔除。
-   - `latest` 是最新一次请求的解码速度；`recent10m` 是最近 10 分钟按 token 加权；`overall` 是整个会话加权。
-   - TTFT 为 `first_token_at − started_at`，受缓存与排队影响，与解码速度独立。
-   - 会话识别：优先 `session_id` 参数，否则按工作目录 + 最近模型流量推断交互式会话。多窗口同时活跃时芯片可能显示别的窗口的速度（tooltip 里有会话号可核对）。
+4. **芯片排错**（用户报告"芯片不见了"或"客户端刚升级后没显示"）：
+   - MCP 服务启动时会自动检测并自愈注入 `app.asar`（无需手工重跑脚本），但注入发生在渲染器已启动之后时，只需按 `Ctrl+R` 刷新或重启一次 ZCode 窗口即可加载最新芯片。
+   - 如需核查注入状态：运行 `node scripts/status.mjs` 查看 `chipInjected`、`chipUpToDate` 与 `httpHostReachable`；也可手动执行 `node scripts/install.mjs`。
+5. **数据口径说明**：
+   - 自动识别三类请求模式，避免将前置隐式思考或末尾单包 JSON 冲刷误算为上千 `tok/s`：
+     - `stream`（流式解码）：含流式思考或纯文本流式，`output_tokens ÷ (completed_at − first_token_at)`。
+     - `vis-stream`（思考后流式）：服务端静默思考后再流式输出可见文本，`(output_tokens − reasoning_tokens) ÷ (completed_at − first_token_at)`。
+     - `e2e`（端到端吞吐）：非流式缓冲或单包工具调用冲刷，`output_tokens ÷ duration_ms`。
+   - 加权平均按 `ΣrateTokens ÷ ΣrateMs` 计算，而非算术平均。
+   - 实时生成期间基于最新未完成 `part` 行估算实时阶段（`thinking` / `streaming` / `tool`）与近似流式速率，步骤完成后自动切换为 `model_usage` 精确值。
 
 ## 回复格式建议
 
-速度数字保留 1 位小数；`streaming` 为 true 时说明"正在流式输出"。
+速度数字保留 1 位小数；说明当前所处阶段（空闲 / 思考中 / 流式输出中 / 工具执行中）。

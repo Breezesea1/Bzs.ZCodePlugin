@@ -1,47 +1,59 @@
-// Loopback HTTP host: the data source for the composer chip. Started once
-// when the MCP server boots so the chip has a stable endpoint for its whole
-// lifetime.
+// Loopback HTTP host: the data source for the TokenPulse composer chip.
+// Runs as a single shared loopback daemon on 127.0.0.1:47816 so closing the
+// first session never strands the renderer chip on a dead port, and self-exits
+// automatically once all ZCode windows close (no polling traffic for 3 minutes).
 import { createServer } from "node:http";
+import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   currentSpeedSnapshot,
   sessionSpeedSnapshot,
   activeSessions,
   dbPath,
 } from "../lib/service.mjs";
+import { close as closeDb } from "../lib/db.mjs";
+import { PORT_FILE, PREFERRED_PORT, PLUGIN_VERSION } from "../scripts/lib/target.mjs";
 
-const PLUGIN_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const SELF_PATH = fileURLToPath(import.meta.url);
 const HOST = "127.0.0.1";
-// Preferred port: fixed so the endpoint survives ZCode restarts without a
-// re-injection. When taken, the OS assigns a random one and the discovery
-// file below tells install.mjs (and any manually launched backend) about it.
-const PREFERRED_PORT = 47816;
+const DAEMON_IDLE_EXIT_MS = 3 * 60 * 1000;
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "cache-control": "no-store",
-  // The renderer page (file:// inside app.asar) reads these endpoints from a
-  // different origin; without this header Chromium blocks the response.
   "access-control-allow-origin": "*",
+  "access-control-allow-private-network": "true",
   "vary": "origin",
 };
 
 let server = null;
 let port = 0;
+let lastTrafficAt = Date.now();
+let idleWatchTimer = null;
 
-function sendJson(res, payload) {
-  res.writeHead(200, JSON_HEADERS);
+function sendJson(res, payload, status = 200) {
+  res.writeHead(status, JSON_HEADERS);
   res.end(JSON.stringify(payload));
 }
 
 async function handleRequest(req, res) {
-  const url = new URL(req.url, `http://${HOST}:${port}`);
+  lastTrafficAt = Date.now();
+  const url = new URL(req.url, `http://${HOST}:${port || PREFERRED_PORT}`);
+
+  if (req.method === "POST" && url.pathname === "/api/shutdown") {
+    sendJson(res, { ok: true, shuttingDown: true });
+    setTimeout(async () => {
+      await stopHttpHost();
+      closeDb();
+      process.exit(0);
+    }, 30);
+    return;
+  }
+
   switch (url.pathname) {
     case "/api/snapshot": {
-      // Explicit session wins; otherwise resolve by the caller-provided dir,
-      // falling back to this process's own project dir (the MCP host session).
       const explicit = url.searchParams.get("session");
       const dir =
         url.searchParams.get("dir") ?? process.env.ZCODE_PROJECT_DIR ?? undefined;
@@ -55,7 +67,13 @@ async function handleRequest(req, res) {
       sendJson(res, { now: Date.now(), sessions: activeSessions({}) });
       return;
     case "/api/ping":
-      sendJson(res, { ok: true, db: dbPath() });
+      sendJson(res, {
+        ok: true,
+        version: PLUGIN_VERSION,
+        port,
+        pid: process.pid,
+        db: dbPath(),
+      });
       return;
     default:
       res.writeHead(404, { "content-type": "text/plain" });
@@ -63,81 +81,149 @@ async function handleRequest(req, res) {
   }
 }
 
-export async function startHttpHost() {
-  if (server) return port;
-  server = createServer(requestHandler);
-  await new Promise((resolve) => {
-    server.once("error", resolve);
-    // Try the fixed port first; fall back to an OS-assigned one so two MCP
-    // processes (or a leftover listener) never block the plugin entirely.
-    server.listen(PREFERRED_PORT, HOST, resolve);
-  }).then((failure) => {
-    if (!failure) return null;
-    server = createServer(requestHandler);
-    return new Promise((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, HOST, resolve);
-    });
-  });
-  port = server.address().port;
-  await writeDiscoveryFile(port);
-  return port;
-}
-
 function requestHandler(req, res) {
   if (req.method === "OPTIONS") {
     res.writeHead(204, {
       ...JSON_HEADERS,
-      "access-control-allow-methods": "GET",
+      "access-control-allow-methods": "GET, POST, OPTIONS",
       "access-control-max-age": "86400",
     });
     res.end();
     return;
   }
   handleRequest(req, res).catch((error) => {
-    res.writeHead(500, JSON_HEADERS);
-    res.end(JSON.stringify({ error: error.message }));
+    sendJson(res, { error: error.message }, 500);
   });
 }
 
-// Several MCP processes boot together (one per session). Only the first wins
-// the fixed port; the rest fall back to a random one. Unconditional writes
-// would let a loser clobber the file with a port that dies with it, so a
-// fallback instance first checks whether the fixed host is answering and, if
-// so, records that stable endpoint instead of its own.
-async function preferredHostAnswers() {
+function tryListen(targetPort) {
+  return new Promise((resolve) => {
+    const srv = createServer(requestHandler);
+    const onError = (err) => {
+      try {
+        srv.close();
+      } catch {}
+      resolve({ ok: false, error: err });
+    };
+    srv.once("error", onError);
+    srv.listen(targetPort, HOST, () => {
+      srv.removeListener("error", onError);
+      resolve({ ok: true, server: srv, port: srv.address().port });
+    });
+  });
+}
+
+export async function probePreferredHost() {
   try {
     const res = await fetch(`http://${HOST}:${PREFERRED_PORT}/api/ping`, {
-      signal: AbortSignal.timeout(500),
+      signal: AbortSignal.timeout(600),
     });
-    if (!res.ok) return false;
-    return (await res.json())?.ok === true;
+    if (!res.ok) return null;
+    const body = await res.json();
+    return body?.ok === true ? body : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-// The injected chip reads its endpoint from a <meta> baked in at install
-// time, which goes stale when the port changes. This file is the fresh
-// source of truth: install.mjs embeds the latest value on re-injection, and
-// the chip falls back to the fixed port when the baked one is dead.
-async function writeDiscoveryFile(activePort) {
-  const recorded =
-    activePort !== PREFERRED_PORT && (await preferredHostAnswers())
-      ? PREFERRED_PORT
-      : activePort;
+async function shutdownPreferredHost() {
   try {
-    const dir = join(
-      process.env.LOCALAPPDATA ?? join(process.env.HOME ?? "", "AppData", "Local"),
-      "Programs", "ZCode", "resources", "bzs-token-speed-backup"
-    );
-    mkdirSync(dir, { recursive: true });
+    await fetch(`http://${HOST}:${PREFERRED_PORT}/api/shutdown`, {
+      method: "POST",
+      signal: AbortSignal.timeout(800),
+    });
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 60));
+      if (!(await probePreferredHost())) return true;
+    }
+  } catch {}
+  return false;
+}
+
+// Ensure a detached daemon is serving 127.0.0.1:47816 on the current plugin version.
+// Falls back to an in-process listener if detached spawn cannot bind.
+export async function ensureHttpDaemon() {
+  const existing = await probePreferredHost();
+  if (existing && existing.version === PLUGIN_VERSION) {
+    return { port: PREFERRED_PORT, mode: "reused", pid: existing.pid };
+  }
+  if (existing && existing.version !== PLUGIN_VERSION) {
+    await shutdownPreferredHost();
+  }
+
+  try {
+    const child = spawn(process.execPath, [SELF_PATH, "--daemon"], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { ...process.env },
+    });
+    child.unref();
+
+    for (let i = 0; i < 15; i++) {
+      await new Promise((r) => setTimeout(r, 80));
+      const live = await probePreferredHost();
+      if (live?.ok) {
+        return { port: PREFERRED_PORT, mode: "daemon", pid: live.pid };
+      }
+    }
+  } catch {}
+
+  const fallbackPort = await startHttpHost();
+  return { port: fallbackPort, mode: "in-process", pid: process.pid };
+}
+
+export async function startHttpHost({ daemonMode = false } = {}) {
+  if (server) return port;
+  let bound = await tryListen(PREFERRED_PORT);
+  if (!bound.ok) {
+    if (daemonMode) {
+      // Another daemon just won the race on 47816; exit cleanly.
+      process.exit(0);
+    }
+    bound = await tryListen(0);
+    if (!bound.ok) throw bound.error;
+  }
+  server = bound.server;
+  port = bound.port;
+  lastTrafficAt = Date.now();
+  await writeDiscoveryFile(port);
+
+  if (daemonMode) {
+    idleWatchTimer = setInterval(async () => {
+      if (Date.now() - lastTrafficAt > DAEMON_IDLE_EXIT_MS) {
+        await stopHttpHost();
+        closeDb();
+        process.exit(0);
+      }
+    }, 30_000);
+    idleWatchTimer.unref?.();
+  }
+  return port;
+}
+
+async function writeDiscoveryFile(activePort) {
+  const existing = activePort !== PREFERRED_PORT ? await probePreferredHost() : null;
+  const recorded = existing ? PREFERRED_PORT : activePort;
+  try {
+    mkdirSync(dirname(PORT_FILE), { recursive: true });
     writeFileSync(
-      join(dir, "http-port.json"),
-      JSON.stringify({ port: recorded, preferredPort: PREFERRED_PORT, updatedAt: new Date().toISOString() }, null, 2)
+      PORT_FILE,
+      JSON.stringify(
+        {
+          port: recorded,
+          preferredPort: PREFERRED_PORT,
+          version: PLUGIN_VERSION,
+          updatedAt: new Date().toISOString(),
+        },
+        null,
+        2
+      )
     );
   } catch (error) {
-    process.stderr.write(`bzs-token-speed: cannot write discovery file: ${error.message}\n`);
+    process.stderr.write(
+      `bzs-token-speed: cannot write discovery file: ${error.message}\n`
+    );
   }
 }
 
@@ -146,9 +232,23 @@ export function httpBaseUrl() {
 }
 
 export function stopHttpHost() {
+  if (idleWatchTimer) {
+    clearInterval(idleWatchTimer);
+    idleWatchTimer = null;
+  }
   if (!server) return Promise.resolve();
   const closing = new Promise((resolve) => server.close(resolve));
   server = null;
   port = 0;
   return closing;
+}
+
+const isMain =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMain && process.argv.includes("--daemon")) {
+  startHttpHost({ daemonMode: true }).catch((error) => {
+    process.stderr.write(`bzs-token-speed daemon failed: ${error.message}\n`);
+    process.exit(1);
+  });
 }
