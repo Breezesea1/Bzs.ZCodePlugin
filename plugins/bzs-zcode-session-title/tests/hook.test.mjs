@@ -1,8 +1,66 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {dispatchStopEvent} from "../hook.mjs";
+import {spawn} from "node:child_process";
+import {mkdtemp,mkdir,writeFile,readFile,rm} from "node:fs/promises";
+import {join} from "node:path";
+import {tmpdir} from "node:os";
+
+async function runHook(t,{legacy,current,raw}={}) {
+  const dir=await mkdtemp(join(tmpdir(),"bzs-hook-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const dataPath=join(dir,"plugin-data"),legacyDir=join(dir,".zcode","bzs-zcode-session-title");
+  await mkdir(dataPath,{recursive:true});
+  if(legacy) {
+    await mkdir(legacyDir,{recursive:true});
+    await writeFile(join(legacyDir,"config.json"),JSON.stringify(legacy));
+  }
+  const configPath=join(dataPath,"config.json");
+  if(current||raw)await writeFile(configPath,raw??JSON.stringify(current));
+  const result=await new Promise((resolve,reject)=>{
+    const child=spawn(process.execPath,[join(import.meta.dirname,"..","hook.mjs"),"--config",configPath],{
+      windowsHide:true,stdio:["pipe","pipe","pipe"],
+      env:{...process.env,USERPROFILE:dir,HOME:dir,ZCODE_PLUGIN_DATA:dataPath,BZS_TITLE_DATA:undefined}
+    });
+    let out="",err="";
+    child.stdout.on("data",c=>out+=c);
+    child.stderr.on("data",c=>err+=c);
+    child.on("error",reject);
+    child.on("close",code=>resolve({code,out,err}));
+    child.stdin.end(JSON.stringify(event));
+  });
+  return {...result,dataPath,legacyDir,configPath,logPath:join(dataPath,"state","hook.log.jsonl")};
+}
 
 const event={session_id:"sess_abc123",workspace_path:"D:\\proj",stop_hook_active:false,hook_event_name:"Stop"};
+
+test("Hook：没有新旧配置时记录 not_configured，不派发 worker",async t=>{
+  const {code,out,logPath,configPath}=await runHook(t);
+  assert.equal(code,0);
+  assert.match(out,/"action":"not_configured"/);
+  const log=JSON.parse((await readFile(logPath,"utf8")).trim());
+  assert.equal(log.action,"not_configured");
+  await assert.rejects(readFile(configPath),{code:"ENOENT"});
+});
+
+test("Hook：自动迁移已暂停的旧配置，并记录 disabled",async t=>{
+  const legacy={selection:{providerId:"magpie",modelId:"test",options:{reasoningLevel:"low"}},enabled:false};
+  const {code,out,legacyDir,configPath}=await runHook(t,{legacy});
+  assert.equal(code,0);
+  assert.match(out,/"action":"disabled"/);
+  assert.deepEqual(JSON.parse(await readFile(configPath,"utf8")),{...legacy,dataDir:join(legacyDir,"state")});
+  const log=JSON.parse((await readFile(join(legacyDir,"state","hook.log.jsonl"),"utf8")).trim());
+  assert.equal(log.action,"disabled");
+});
+
+test("Hook：配置 JSON 损坏时记录 error，不误报 dispatched",async t=>{
+  const {code,out,logPath}=await runHook(t,{raw:"{broken"});
+  assert.equal(code,0);
+  assert.match(out,/hook-error/);
+  const log=JSON.parse((await readFile(logPath,"utf8")).trim());
+  assert.equal(log.action,"error");
+  assert.ok(log.error);
+});
 
 test("dispatchStopEvent：延迟后派发 worker",async()=>{
   const spawned=[];

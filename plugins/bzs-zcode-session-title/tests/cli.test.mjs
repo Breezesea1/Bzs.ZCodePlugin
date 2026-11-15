@@ -36,6 +36,58 @@ function runCli(args,stdin,{env={}}={}) {
   });
 }
 
+async function migrationSandbox(t,legacy) {
+  const sandbox=await makeSandbox();
+  t.after(sandbox.cleanup);
+  const legacyDir=join(sandbox.dir,".zcode","bzs-zcode-session-title");
+  await mkdir(legacyDir,{recursive:true});
+  const legacyPath=join(legacyDir,"config.json");
+  await writeConfig(legacyPath,legacy);
+  return {...sandbox,legacyDir,legacyPath,configPath:join(sandbox.dataPath,"config.json"),
+    env:{USERPROFILE:sandbox.dir,HOME:sandbox.dir,ZCODE_PLUGIN_DATA:sandbox.dataPath}};
+}
+
+test("CLI status：自动迁移旧配置，保留选择、开关、自定义字段和旧状态目录",async t=>{
+  const legacy={selection,enabled:false,timeoutMs:123456,rename:{maxTurns:8},custom:"retained"};
+  const {configPath,legacyPath,legacyDir,env}=await migrationSandbox(t,legacy);
+  const {code,out}=await runCli(["status"],{},{env});
+  assert.equal(code,0);
+  const result=JSON.parse(out);
+  assert.equal(result.enabled,false);
+  assert.deepEqual(result.selection,selection);
+  assert.equal(result.dataDir,join(legacyDir,"state"));
+  assert.deepEqual(JSON.parse(await readFile(configPath,"utf8")),{...legacy,dataDir:join(legacyDir,"state")});
+  assert.deepEqual(JSON.parse(await readFile(legacyPath,"utf8")),legacy);
+});
+
+test("CLI status：并发迁移保留旧配置中相对 dataDir 的含义",async t=>{
+  const legacy={selection,enabled:true,dataDir:"custom-state"};
+  const {configPath,legacyDir,env}=await migrationSandbox(t,legacy);
+  const results=await Promise.all([runCli(["status"],{},{env}),runCli(["status"],{},{env})]);
+  for(const {code,out} of results) {
+    assert.equal(code,0);
+    assert.equal(JSON.parse(out).dataDir,join(legacyDir,"custom-state"));
+  }
+  assert.deepEqual(JSON.parse(await readFile(configPath,"utf8")),{...legacy,dataDir:join(legacyDir,"custom-state")});
+});
+
+test("CLI status：已有新配置不被旧配置覆盖",async t=>{
+  const {configPath,env}=await migrationSandbox(t,{selection,enabled:true});
+  const current={selection,enabled:false,rename:{maxTurns:3}};
+  await writeConfig(configPath,current);
+  const {code,out}=await runCli(["status"],{},{env});
+  assert.equal(code,0);
+  assert.equal(JSON.parse(out).enabled,false);
+  assert.deepEqual(JSON.parse(await readFile(configPath,"utf8")),current);
+});
+
+test("CLI run：显式指定其他路径时不迁移全局旧配置",async t=>{
+  const {dataPath,env}=await migrationSandbox(t,{selection});
+  const {code,out}=await runCli(["run","--config",join(dataPath,"other.json")],{},{env});
+  assert.equal(code,0);
+  assert.equal(JSON.parse(out).status,"not_configured");
+});
+
 test("CLI run：未配置时输出 not_configured 且退出码 0",async()=>{
   const {dataPath,cleanup}=await makeSandbox();
   const {code,out}=await runCli(["run","--config",join(dataPath,"config.json")],{session_id:"sess_x",workspace_path:"D:\\w"});

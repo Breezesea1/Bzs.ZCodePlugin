@@ -8,8 +8,7 @@ import {join,dirname} from "node:path";
 import {homedir} from "node:os";
 import {appendFile,mkdir} from "node:fs/promises";
 import {fileURLToPath,pathToFileURL} from "node:url";
-import {resolveDataDir} from "./config.mjs";
-import {readJsonOptional} from "./fsutil.mjs";
+import {resolveDataDir,readConfig} from "./config.mjs";
 
 const pluginRoot=dirname(fileURLToPath(import.meta.url));
 
@@ -49,12 +48,10 @@ if(isMain) {
   for await(const chunk of process.stdin)raw+=chunk;
   let payload=null;
   try {payload=JSON.parse(raw);}catch {}
-  // 派发前只读开关与 dataDir 两个键，完整校验由 worker 的 loadConfig 负责；
-  // hook 进程要快进快出，不重复跑一遍配置验证。
+  // 完整校验由 worker 负责；Hook 先迁移旧配置并检查开关，缺配置不派发。
   let supplied=null;
-  if(configPath) {try {supplied=await readJsonOptional(configPath);}catch {supplied=null;}}
-  const dataDir=configPath
-    ?resolveDataDir(configPath,supplied??{},process.env)
+  let dataDir=configPath
+    ?resolveDataDir(configPath,{},process.env)
     :(process.env.BZS_TITLE_DATA??join(homedir(),".zcode","bzs-zcode-session-title"));
   const logHook=async entry=>{
     try {
@@ -64,7 +61,12 @@ if(isMain) {
   };
   try {
     let result;
-    if(configPath&&payload?.stop_hook_active!==true&&supplied?.enabled===false)result={action:"disabled"};
+    if(configPath&&payload?.stop_hook_active!==true) {
+      supplied=await readConfig(configPath);
+      dataDir=resolveDataDir(configPath,supplied??{},process.env);
+      if(supplied===null)result={action:"not_configured"};
+      else if(supplied.enabled===false)result={action:"disabled"};
+    }
     result??=await dispatchStopEvent({payload,dataDir,pluginRoot,configPath});
     // stdout 首字符不能是 "{"：宿主会把它当 hook 决策 JSON 解析
     console.log("bzs-zcode-session-title:",JSON.stringify(result));

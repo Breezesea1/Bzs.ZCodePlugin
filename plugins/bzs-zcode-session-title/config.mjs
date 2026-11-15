@@ -3,6 +3,8 @@
 import {homedir} from "node:os";
 import {join,resolve,dirname} from "node:path";
 import {readJsonOptional} from "./fsutil.mjs";
+import {randomUUID} from "node:crypto";
+import {mkdir,readFile,writeFile,link,unlink} from "node:fs/promises";
 
 const PROVIDER_ID_RE=/^[\w:@.-]{1,128}$/;
 const MODEL_ID_RE=/^[\w:@.\/ -]{1,128}$/;
@@ -27,6 +29,29 @@ export const CONFIG_DEFAULTS={
 // hook（读 config 提取 dataDir）与 CLI（读合并后配置）共用同一解析规则。
 export function resolveDataDir(configPath,supplied={},env=process.env) {
   return resolve(dirname(configPath),env.BZS_TITLE_DATA??supplied.dataDir??"state");
+}
+
+// 仅为宿主插件数据目录补迁移；显式传入的其他配置路径不继承全局配置。
+export async function readConfig(configPath,{env=process.env}={}) {
+  try {return JSON.parse(await readFile(configPath,"utf8"));}
+  catch(error) {if(error.code!=="ENOENT")throw error;}
+  if(!env.ZCODE_PLUGIN_DATA||resolve(configPath)!==resolve(env.ZCODE_PLUGIN_DATA,"config.json"))return null;
+  const legacyPath=join(homedir(),".zcode","bzs-zcode-session-title","config.json");
+  if(resolve(configPath)===resolve(legacyPath))return null;
+  const legacy=await readJsonOptional(legacyPath);
+  if(legacy===null)return null;
+  // 相对 dataDir（含默认 state）继续指向原目录，保留改名状态与日志。
+  const supplied=typeof legacy==="object"&&!Array.isArray(legacy)
+    ?{...legacy,dataDir:resolveDataDir(legacyPath,legacy,{})}:legacy;
+  await mkdir(dirname(configPath),{recursive:true});
+  const temporary=configPath+".tmp-"+randomUUID();
+  try {
+    await writeFile(temporary,JSON.stringify(supplied,null,2)+"\n","utf8");
+    // 硬链接原子发布完整文件，目标已存在则让位，避免并发覆盖新配置。
+    try {await link(temporary,configPath);}
+    catch(error) {if(error.code!=="EEXIST")throw error;}
+  } finally {await unlink(temporary);}
+  return readJsonOptional(configPath);
 }
 
 // 管理命令（enable/status/lock 等）不依赖会话；run 命令必须完整配置。
@@ -57,7 +82,7 @@ export function validateSelection(selection,view) {
 export async function loadConfig(configPath,{env=process.env,allowDisabled=false}={}) {
   let supplied={};
   try {
-    const parsed=await readJsonOptional(configPath);
+    const parsed=await readConfig(configPath,{env});
     if(parsed===null)return {error:"not_configured",message:"配置文件不存在："+configPath};
     supplied=parsed;
   } catch(error) {

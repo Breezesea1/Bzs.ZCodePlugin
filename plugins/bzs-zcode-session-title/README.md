@@ -25,6 +25,10 @@
 
 通过本地插件市场安装后，让 Agent 按 [setup](./skills/setup/SKILL.md) 初始化：核验环境 → 从宿主目录选择任意模型与档位 → doctor 体检 → 启用。
 
+从旧版升级时，若 `${ZCODE_PLUGIN_DATA}/config.json` 不存在，Hook 或 CLI 首次读取会自动迁移 `~/.zcode/bzs-zcode-session-title/config.json`，保留启用开关、模型选择与其他字段，并让 `dataDir` 继续指向旧状态目录。已有新配置不会被覆盖，旧配置文件保留。显式指定其他配置路径时不自动迁移；模型 ID 不再可用时需按宿主目录手动更新。
+
+全新安装没有旧配置时仍需运行 setup；Hook 会记录 `not_configured` 并跳过派发。配置 JSON 损坏或迁移失败会记录 `error`，暂停时记录 `disabled`；`dispatched` 仅表示 worker 已派发，执行结果见 `runner.log.jsonl`。
+
 ## 配置
 
 配置文件在插件数据目录 `${ZCODE_PLUGIN_DATA}/config.json`，完整字段与范围见 [configuration](./skills/configuration/SKILL.md)：
