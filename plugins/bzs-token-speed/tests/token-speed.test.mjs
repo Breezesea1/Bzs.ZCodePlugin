@@ -388,7 +388,7 @@ describe("SQLite integration, draft isolation & MCP tools", () => {
     assert.equal(snap.summary.cacheHitRatio, 0.75);
 
     const initReply = await handleMcp({ jsonrpc: "2.0", id: 1, method: "initialize" });
-    assert.equal(initReply.result.serverInfo.version, "0.3.0");
+    assert.equal(initReply.result.serverInfo.version, "0.3.1");
 
     const callReply = await handleMcp({
       jsonrpc: "2.0",

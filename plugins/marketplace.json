@@ -22,7 +22,7 @@
     {
       "name": "bzs-token-speed",
       "source": "./bzs-token-speed",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "description": "Inline per-session token speed (tok/s) pill in the ZCode composer toolbar, with real-time streaming status, trajectory sparkline, interactive HUD popover and MCP query tools.",
       "displayName": "TokenPulse",
       "displayName_i18n": {
