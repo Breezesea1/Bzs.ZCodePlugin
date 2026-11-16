@@ -278,6 +278,17 @@ describe("injection markers & meta cleanup", () => {
     assert.ok(!stripped.includes("bzs-token-speed-base"));
     assert.ok(!stripped.includes("bzs-token-speed-version"));
   });
+
+  it("normalizes line endings in computeChipVersionTag across LF, CRLF, and CR", () => {
+    const lf = "const a = 1;\nconst b = 2;\n";
+    const crlf = "const a = 1;\r\nconst b = 2;\r\n";
+    const cr = "const a = 1;\rconst b = 2;\r";
+
+    const tag = computeChipVersionTag(lf);
+    assert.equal(computeChipVersionTag(crlf), tag);
+    assert.equal(computeChipVersionTag(cr), tag);
+    assert.notEqual(computeChipVersionTag("const a = 1;\nconst b = 3;\n"), tag);
+  });
 });
 
 describe("SQLite integration, draft isolation & MCP tools", () => {

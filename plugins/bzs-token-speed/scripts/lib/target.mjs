@@ -32,7 +32,9 @@ export const INJECT_END = "<!-- bzs-token-speed:end -->";
 const META_TAGS_RE = /[ \t]*<meta name="bzs-token-speed-(?:base|version)"[^>]*>\r?\n?/gi;
 
 export function computeChipVersionTag(chipScript) {
-  const hash8 = createHash("sha256").update(chipScript).digest("hex").slice(0, 8);
+  // Normalize line endings so Windows CRLF checkouts match LF plugin cache hashes.
+  const normalized = String(chipScript).replace(/\r\n?/g, "\n");
+  const hash8 = createHash("sha256").update(normalized).digest("hex").slice(0, 8);
   return `${PLUGIN_VERSION}:${hash8}`;
 }
 
