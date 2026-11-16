@@ -23,11 +23,11 @@
 
 ## 安装
 
-通过本地插件市场安装后，让 Agent 按 [setup](./skills/setup/SKILL.md) 初始化：核验环境 → 从宿主目录选择任意模型与档位 → doctor 体检 → 启用。
+通过本地插件市场安装后即可自动初始化默认配置；如需自定义模型或逐项体检，可让 Agent 按 [setup](./skills/setup/SKILL.md) 检查与调整。
 
-从旧版升级时，若 `${ZCODE_PLUGIN_DATA}/config.json` 不存在，Hook 或 CLI 首次读取会自动迁移 `~/.zcode/bzs-zcode-session-title/config.json`，保留启用开关、模型选择与其他字段，并让 `dataDir` 继续指向旧状态目录。已有新配置不会被覆盖，旧配置文件保留。显式指定其他配置路径时不自动迁移；模型 ID 不再可用时需按宿主目录手动更新。
-
-全新安装没有旧配置时仍需运行 setup；Hook 会记录 `not_configured` 并跳过派发。配置 JSON 损坏或迁移失败会记录 `error`，暂停时记录 `disabled`；`dispatched` 仅表示 worker 已派发，执行结果见 `runner.log.jsonl`。
+- **旧版自动迁移**：若 `${ZCODE_PLUGIN_DATA}/config.json` 不存在，首次 `SessionStart` / `Stop` Hook 或 CLI 读取会自动迁移 `~/.zcode/bzs-zcode-session-title/config.json`，保留启用开关、模型选择与其他字段，并让 `dataDir` 继续指向旧状态目录（旧配置文件保留）。
+- **新用户默认初始化**：若新旧配置均不存在，首次 `SessionStart` / `Stop` Hook 或 CLI 读取 `${ZCODE_PLUGIN_DATA}/config.json` 时会自动生成默认 `config.json`：优先从宿主可用模型目录匹配轻量高速模型（如 `GLM-5.3-Flash` 等）与低思考档位并设 `enabled: true`（开箱即用）；若宿主尚无可用模型，则生成默认模板并设 `enabled: false` 待配置渠道后启用。
+- **既有配置保护与显式路径**：已有 `config.json` 不会被覆盖；显式指定其他 `--config` 路径时不触发全局迁移或自动生成。配置 JSON 损坏或迁移失败会记录 `error`，暂停时记录 `disabled`；`dispatched` 仅表示 worker 已派发，执行结果见 `runner.log.jsonl`。
 
 ## 配置
 

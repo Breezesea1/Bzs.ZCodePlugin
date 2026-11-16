@@ -6,8 +6,14 @@
       "reasoningLevel": "low"
     }
   },
+  "enabled": true,
   "dataDir": "state",
   "timeoutMs": 120000,
   "maxOutputTokens": 2048,
-  "enabled": true
+  "rename": {
+    "requireFormat": true,
+    "maxTitleChars": 48,
+    "minTitleChars": 6,
+    "maxTurns": 6
+  }
 }

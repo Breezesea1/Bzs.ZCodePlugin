@@ -1,14 +1,24 @@
 // 配置加载与校验。外置 config.json 位于插件数据目录（${ZCODE_PLUGIN_DATA}/config.json），
-// hook 与 CLI 共享；enabled:false 时 hook 静默跳过，首次配置保持暂停待用户选模型。
+// hook 与 CLI 共享；enabled:false 时 hook 静默跳过，首次安装按宿主目录自动初始化默认配置。
 import {homedir} from "node:os";
 import {join,resolve,dirname} from "node:path";
 import {readJsonOptional} from "./fsutil.mjs";
+import {loadHostCatalog} from "./hostcatalog.mjs";
 import {randomUUID} from "node:crypto";
 import {mkdir,readFile,writeFile,link,unlink} from "node:fs/promises";
 
 const PROVIDER_ID_RE=/^[\w:@.-]{1,128}$/;
 const MODEL_ID_RE=/^[\w:@.\/ -]{1,128}$/;
 const REASONING_LEVEL_RE=/^[\w-]{1,32}$/;
+const FAST_MODEL_RE=/(?:^|[\/_.-])(?:flash|mini|nano|lite|haiku|fast)(?:$|[\/_.-])/i;
+const TURBO_MODEL_RE=/(?:^|[\/_.-])turbo(?:$|[\/_.-])/i;
+const HEAVY_MODEL_RE=/reasoner|thinking|opus|ultra|explorer|(?:^|[\/_.-])r1(?:$|[\/_.-])/i;
+const REASONING_PREFERENCE=["low","minimal","disabled","none","off","medium","enabled","high"];
+const FALLBACK_SELECTION={
+  providerId:"account:bigmodel-individual-coding-plan",
+  modelId:"GLM-5.3-Flash",
+  options:{reasoningLevel:"low"}
+};
 
 export const CONFIG_DEFAULTS={
   sessionDb:join(homedir(),".zcode","cli","db","db.sqlite"),
@@ -31,27 +41,91 @@ export function resolveDataDir(configPath,supplied={},env=process.env) {
   return resolve(dirname(configPath),env.BZS_TITLE_DATA??supplied.dataDir??"state");
 }
 
-// 仅为宿主插件数据目录补迁移；显式传入的其他配置路径不继承全局配置。
-export async function readConfig(configPath,{env=process.env}={}) {
-  try {return JSON.parse(await readFile(configPath,"utf8"));}
-  catch(error) {if(error.code!=="ENOENT")throw error;}
-  if(!env.ZCODE_PLUGIN_DATA||resolve(configPath)!==resolve(env.ZCODE_PLUGIN_DATA,"config.json"))return null;
-  const legacyPath=join(homedir(),".zcode","bzs-zcode-session-title","config.json");
-  if(resolve(configPath)===resolve(legacyPath))return null;
-  const legacy=await readJsonOptional(legacyPath);
-  if(legacy===null)return null;
-  // 相对 dataDir（含默认 state）继续指向原目录，保留改名状态与日志。
-  const supplied=typeof legacy==="object"&&!Array.isArray(legacy)
-    ?{...legacy,dataDir:resolveDataDir(legacyPath,legacy,{})}:legacy;
+function resolveHomeDir(env=process.env) {
+  return (process.platform==="win32"?env.USERPROFILE||env.HOME:env.HOME||env.USERPROFILE)||homedir();
+}
+
+function pickReasoningLevel(model) {
+  const values=(model?.config?.optionSpecs?.reasoningLevel?.values??[]).filter(v=>typeof v==="string"&&REASONING_LEVEL_RE.test(v));
+  if(!values.length)return "low";
+  return REASONING_PREFERENCE.find(level=>values.includes(level))??values[0];
+}
+
+// 从宿主可用模型目录挑选默认总结模型：优先轻量高速模型，其次常规非重型推理模型。
+export function pickDefaultSelection(catalog) {
+  const providers=(catalog?.providers??[]).filter(p=>typeof p?.providerId==="string"&&PROVIDER_ID_RE.test(p.providerId));
+  const candidates=[];
+  for(const provider of providers) {
+    for(const model of provider.models??[]) {
+      if(typeof model?.modelId!=="string"||!MODEL_ID_RE.test(model.modelId))continue;
+      const selection={providerId:provider.providerId,modelId:model.modelId,options:{reasoningLevel:pickReasoningLevel(model)}};
+      if(validateSelection(selection,catalog)!==null)continue;
+      const tier=FAST_MODEL_RE.test(model.modelId)?0
+        :TURBO_MODEL_RE.test(model.modelId)?1
+        :HEAVY_MODEL_RE.test(model.modelId)?3:2;
+      candidates.push({tier,selection});
+    }
+  }
+  if(!candidates.length)return null;
+  candidates.sort((a,b)=>a.tier-b.tier);
+  return candidates[0].selection;
+}
+
+export async function buildDefaultConfig({env=process.env}={}) {
+  let matched=null;
+  try {
+    const catalog=await loadHostCatalog({env,homeDir:resolveHomeDir(env)});
+    matched=pickDefaultSelection(catalog);
+  }catch {}
+  const {enabled:_r,...renameDefaults}=CONFIG_DEFAULTS.rename;
+  return {
+    selection:matched??structuredClone(FALLBACK_SELECTION),
+    enabled:matched!==null,
+    dataDir:"state",
+    timeoutMs:CONFIG_DEFAULTS.timeoutMs,
+    maxOutputTokens:CONFIG_DEFAULTS.maxOutputTokens,
+    rename:renameDefaults
+  };
+}
+
+// 硬链接原子发布完整文件，目标已存在则让位并回读，避免并发初始化互相覆盖。
+async function publishConfigIfAbsent(configPath,supplied) {
   await mkdir(dirname(configPath),{recursive:true});
   const temporary=configPath+".tmp-"+randomUUID();
   try {
     await writeFile(temporary,JSON.stringify(supplied,null,2)+"\n","utf8");
-    // 硬链接原子发布完整文件，目标已存在则让位，避免并发覆盖新配置。
     try {await link(temporary,configPath);}
     catch(error) {if(error.code!=="EEXIST")throw error;}
-  } finally {await unlink(temporary);}
+  } finally {await unlink(temporary).catch(()=>{});}
   return readJsonOptional(configPath);
+}
+
+function isPluginDataConfigPath(configPath,env=process.env) {
+  return Boolean(env.ZCODE_PLUGIN_DATA&&resolve(configPath)===resolve(env.ZCODE_PLUGIN_DATA,"config.json"));
+}
+
+// 读取并在插件数据目录缺失 config.json 时自动迁移旧配置或生成默认配置。
+// 显式传入的其他配置路径默认不继承或伪造配置（createDefault=true 除外）。
+export async function ensureConfig(configPath,{env=process.env,createDefault=false}={}) {
+  try {return {config:JSON.parse(await readFile(configPath,"utf8")),origin:"existing"};}
+  catch(error) {if(error.code!=="ENOENT")throw error;}
+  if(!isPluginDataConfigPath(configPath,env)&&!createDefault)return {config:null,origin:"missing"};
+  const legacyPath=join(resolveHomeDir(env),".zcode","bzs-zcode-session-title","config.json");
+  if(resolve(configPath)!==resolve(legacyPath)) {
+    const legacy=await readJsonOptional(legacyPath);
+    if(legacy!==null) {
+      // 相对 dataDir（含默认 state）继续指向原目录，保留改名状态与日志。
+      const supplied=typeof legacy==="object"&&!Array.isArray(legacy)
+        ?{...legacy,dataDir:resolveDataDir(legacyPath,legacy,{})}:legacy;
+      return {config:await publishConfigIfAbsent(configPath,supplied),origin:"migrated"};
+    }
+  }
+  const defaults=await buildDefaultConfig({env});
+  return {config:await publishConfigIfAbsent(configPath,defaults),origin:"initialized"};
+}
+
+export async function readConfig(configPath,{env=process.env}={}) {
+  return (await ensureConfig(configPath,{env})).config;
 }
 
 // 管理命令（enable/status/lock 等）不依赖会话；run 命令必须完整配置。

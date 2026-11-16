@@ -8,7 +8,7 @@ import {join,dirname} from "node:path";
 import {homedir} from "node:os";
 import {appendFile,mkdir} from "node:fs/promises";
 import {fileURLToPath,pathToFileURL} from "node:url";
-import {resolveDataDir,readConfig} from "./config.mjs";
+import {resolveDataDir,readConfig,ensureConfig} from "./config.mjs";
 
 const pluginRoot=dirname(fileURLToPath(import.meta.url));
 
@@ -40,18 +40,26 @@ function defaultSpawnWorker({script,args,event,dataDir}) {
 
 const isMain=process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href;
 if(isMain) {
-  let configPath=null;
+  let configPath=null,initOnly=false;
   for(let i=2;i<process.argv.length;i++) {
-    if(process.argv[i]==="--config"&&process.argv[i+1])configPath=process.argv[++i];
+    if(process.argv[i]==="--init")initOnly=true;
+    else if(process.argv[i]==="--config"&&process.argv[i+1])configPath=process.argv[++i];
   }
   let raw="";
   for await(const chunk of process.stdin)raw+=chunk;
   let payload=null;
   try {payload=JSON.parse(raw);}catch {}
-  // 完整校验由 worker 负责；Hook 先迁移旧配置并检查开关，缺配置不派发。
+  const isSessionStart=initOnly||payload?.hook_event_name==="SessionStart";
+  const hasUnexpanded=Boolean(configPath&&/\$\{[^}]+\}/.test(configPath));
+  const effectiveConfigPath=configPath&&!hasUnexpanded
+    ?configPath
+    :((isSessionStart||hasUnexpanded)&&process.env.ZCODE_PLUGIN_DATA
+      ?join(process.env.ZCODE_PLUGIN_DATA,"config.json")
+      :null);
+  // 完整校验由 worker 负责；Hook 先迁移旧配置或生成默认配置并检查开关，缺配置不派发。
   let supplied=null;
-  let dataDir=configPath
-    ?resolveDataDir(configPath,{},process.env)
+  let dataDir=effectiveConfigPath
+    ?resolveDataDir(effectiveConfigPath,{},process.env)
     :(process.env.BZS_TITLE_DATA??join(homedir(),".zcode","bzs-zcode-session-title"));
   const logHook=async entry=>{
     try {
@@ -60,20 +68,32 @@ if(isMain) {
     }catch{}
   };
   try {
+    if(isSessionStart) {
+      if(effectiveConfigPath) {
+        const ensured=await ensureConfig(effectiveConfigPath,{env:process.env,createDefault:true});
+        supplied=ensured.config;
+        dataDir=resolveDataDir(effectiveConfigPath,supplied??{},process.env);
+        if(ensured.origin!=="existing") {
+          await logHook({event:payload?.hook_event_name??"SessionStart",action:ensured.origin,sessionId:payload?.session_id??null,cwd:payload?.cwd??payload?.workspace_path??null,error:null});
+        }
+      }
+      process.exit(0);
+    }
     let result;
-    if(configPath&&payload?.stop_hook_active!==true) {
-      supplied=await readConfig(configPath);
-      dataDir=resolveDataDir(configPath,supplied??{},process.env);
+    if(effectiveConfigPath&&payload?.stop_hook_active!==true) {
+      supplied=await readConfig(effectiveConfigPath);
+      dataDir=resolveDataDir(effectiveConfigPath,supplied??{},process.env);
       if(supplied===null)result={action:"not_configured"};
       else if(supplied.enabled===false)result={action:"disabled"};
     }
-    result??=await dispatchStopEvent({payload,dataDir,pluginRoot,configPath});
+    result??=await dispatchStopEvent({payload,dataDir,pluginRoot,configPath:effectiveConfigPath});
     // stdout 首字符不能是 "{"：宿主会把它当 hook 决策 JSON 解析
     console.log("bzs-zcode-session-title:",JSON.stringify(result));
     await logHook({event:payload?.hook_event_name??"Stop",action:result.action,sessionId:payload?.session_id??null,cwd:payload?.cwd??payload?.workspace_path??null,stopHookActive:payload?.stop_hook_active===true,error:null});
   } catch(error) {
-    console.log("bzs-zcode-session-title: hook-error",error.message);
-    await logHook({event:payload?.hook_event_name??"Stop",action:"error",sessionId:payload?.session_id??null,cwd:payload?.cwd??payload?.workspace_path??null,error:String(error.message).slice(0,200)});
+    // SessionStart 保持 stdout 静默，避免非预期文本被宿主注入对话上下文
+    if(!isSessionStart)console.log("bzs-zcode-session-title: hook-error",error.message);
+    await logHook({event:payload?.hook_event_name??(isSessionStart?"SessionStart":"Stop"),action:"error",sessionId:payload?.session_id??null,cwd:payload?.cwd??payload?.workspace_path??null,error:String(error.message).slice(0,200)});
   }
   process.exit(0);
 }

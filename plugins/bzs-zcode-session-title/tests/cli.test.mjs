@@ -81,6 +81,58 @@ test("CLI status：已有新配置不被旧配置覆盖",async t=>{
   assert.deepEqual(JSON.parse(await readFile(configPath,"utf8")),current);
 });
 
+test("CLI status：无新旧配置时为插件数据目录生成默认 config.json",async t=>{
+  const sandbox=await makeSandbox();
+  t.after(sandbox.cleanup);
+  const v2Dir=join(sandbox.dir,"v2");
+  await mkdir(v2Dir,{recursive:true});
+  const personalPath=join(v2Dir,"provider_config.json");
+  await writeFile(personalPath,JSON.stringify({
+    schemaVersion:1,
+    config:{
+      providerConfigRules:{
+        providerRules:[{
+          providerId:"magpie",
+          providerName:"magpie",
+          enabled:true,
+          config:{
+            access:{type:"api-key",apiKey:"k"},
+            api:{type:"openai-responses",baseUrl:"http://127.0.0.1:3425"},
+            personalModelIds:["bzs/auto/gpt-6.1-sol","bzs/group/deepseek-flash"]
+          }
+        }]
+      },
+      modelConfigRules:{
+        providerModelRules:[
+          {providerId:"magpie",modelId:"bzs/group/deepseek-flash",config:{optionSpecs:{reasoningLevel:{values:["low","high"]}}}}
+        ],
+        manualProviderModelRules:[]
+      }
+    }
+  }));
+  const configPath=join(sandbox.dataPath,"config.json");
+  const {code,out}=await runCli(["status"],{},{
+    env:{
+      USERPROFILE:sandbox.dir,
+      HOME:sandbox.dir,
+      LOCALAPPDATA:join(sandbox.dir,"AppData","Local"),
+      ZCODE_PLUGIN_DATA:sandbox.dataPath,
+      BZS_TITLE_ZCODE_V2_DIR:v2Dir,
+      ZCODE_BUILTIN_PROVIDER_CONFIG_FILE:join(v2Dir,"none.json"),
+      ZCODE_PERSONAL_PROVIDER_CONFIG_FILE:personalPath,
+      BZS_TITLE_CREDENTIALS:join(v2Dir,"none-creds.json")
+    }
+  });
+  assert.equal(code,0);
+  const status=JSON.parse(out);
+  assert.equal(status.status,"status");
+  assert.equal(status.enabled,true);
+  assert.deepEqual(status.selection,{providerId:"magpie",modelId:"bzs/group/deepseek-flash",options:{reasoningLevel:"low"}});
+  const saved=JSON.parse(await readFile(configPath,"utf8"));
+  assert.equal(saved.enabled,true);
+  assert.equal(saved.rename.maxTurns,6);
+});
+
 test("CLI run：显式指定其他路径时不迁移全局旧配置",async t=>{
   const {dataPath,env}=await migrationSandbox(t,{selection});
   const {code,out}=await runCli(["run","--config",join(dataPath,"other.json")],{},{env});
