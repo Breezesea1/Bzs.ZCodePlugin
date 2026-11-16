@@ -52,6 +52,43 @@ test("candidateFrom：keep 但原标题违规时标记 invalid_keep_title",()=>{
   assert.equal(candidateFrom(ok,"🧩 正常｜标题",fmt).title,"🧩 正常｜标题");
 });
 
+test("candidateFrom：容错提取带尾随文本、围栏外说明或重复一致决策块的 JSON",()=>{
+  const obj={action:"keep",title:"🧩 工作区运行状态｜修复验收发现问题",reason:"主线仍是修复验收问题"};
+  // 复现线上错误："Unexpected non-whitespace character after JSON at position 72 (line 3 column 1)"
+  const withTrailing=JSON.stringify(obj)+"\n\n注：当前标题结构已合规";
+  assert.equal(candidateFrom({finishReason:"stop",text:withTrailing},obj.title,fmt).title,obj.title);
+
+  const fencedWithProse="分析如下 {未闭合：\n```json\n"+JSON.stringify({action:"rename",title:"🧩 邮箱注册｜验证码修复",reason:"修复 \"}\" 与 {id} 解析"})+"\n```\n以上";
+  const fromFence=candidateFrom({finishReason:"stop",text:fencedWithProse},"旧标题",fmt);
+  assert.equal(fromFence.action,"rename");
+  assert.equal(fromFence.title,"🧩 邮箱注册｜验证码修复");
+
+  const withPrefixObj="参考 {\"ignored\":1} 后决定：\n"+JSON.stringify(obj);
+  assert.equal(candidateFrom({finishReason:"stop",text:withPrefixObj},obj.title,fmt).action,"keep");
+
+  const duplicated=JSON.stringify(obj)+"\n\n"+JSON.stringify(obj);
+  assert.equal(candidateFrom({finishReason:"stop",text:duplicated},obj.title,fmt).action,"keep");
+
+  const conflicting=JSON.stringify(obj)+"\n"+JSON.stringify({action:"rename",title:"🧩 其他｜不同标题",reason:"冲突"});
+  assert.throws(()=>candidateFrom({finishReason:"stop",text:conflicting},obj.title,fmt),err=>err.reasonCode==="model_output_invalid"&&/不一致/.test(err.message));
+
+  assert.throws(()=>candidateFrom({finishReason:"stop",text:"纯说明文字无 JSON"},obj.title,fmt),err=>err.reasonCode==="model_output_invalid");
+});
+
+test("runNaming：invalid_keep_title 二次仍 keep 且响应附带尾随文本时正常回落",async()=>{
+  const {backend}=makeBackend({
+    read:async()=>({...baseRead,title:"你好"}),
+    generate:async context=>({
+      finishReason:"stop",
+      text:JSON.stringify({action:"keep",title:"你好",reason:context.title_format_feedback?"仍为问候":"仅问候"})+"\n\n说明：信息不足"
+    })
+  });
+  const result=await runNaming({backend,selection:{},apply:false});
+  assert.equal(result.action,"keep");
+  assert.equal(result.title,"你好");
+  assert.equal(result.reason,"仍为问候");
+});
+
 test("candidateFrom：reason 含敏感信息时拒绝",()=>{
   const result={finishReason:"stop",text:JSON.stringify({action:"rename",title:"🧩 邮箱注册｜修复",reason:"见 https://example.com"})};
   assert.throws(()=>candidateFrom(result,"旧",fmt),/链接、凭据或私人路径/);

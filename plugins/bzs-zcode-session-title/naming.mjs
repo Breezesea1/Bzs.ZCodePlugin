@@ -17,12 +17,82 @@ export function titleFormatError(title,{maxChars=48,minChars=6,requireFormat=tru
   return null;
 }
 
+function isSummaryObject(value) {
+  return Boolean(value&&typeof value==="object"&&!Array.isArray(value)
+    &&Object.keys(value).sort().join(",")==="action,reason,title"
+    &&["keep","rename"].includes(value.action)
+    &&typeof value.title==="string"
+    &&typeof value.reason==="string");
+}
+
+function startsJsonObject(text,index) {
+  for(let i=index+1;i<text.length;i++) {
+    if(/\s/.test(text[i]))continue;
+    return text[i]==="\""||text[i]==="}";
+  }
+  return false;
+}
+
+// 从可能附带前后说明文字、Markdown 围栏或重复输出块的响应中提取顶层 JSON 对象。
+function scanJsonObjects(text) {
+  const objects=[];
+  for(let i=0;i<text.length;i++) {
+    if(text[i]!=="{"||!startsJsonObject(text,i))continue;
+    let depth=0,inString=false,escaped=false,parsed=null,endIndex=-1;
+    for(let j=i;j<text.length;j++) {
+      const ch=text[j];
+      if(inString) {
+        if(escaped) {escaped=false;continue;}
+        if(ch==="\\") {escaped=true;continue;}
+        if(ch==="\"")inString=false;
+        continue;
+      }
+      if(ch==="\"") {inString=true;continue;}
+      if(ch==="{")depth++;
+      else if(ch==="}") {
+        depth--;
+        if(depth===0) {
+          try {
+            const candidate=JSON.parse(text.slice(i,j+1));
+            if(candidate&&typeof candidate==="object"&&!Array.isArray(candidate)) {
+              parsed=candidate;
+              endIndex=j;
+            }
+          } catch {}
+          break;
+        }
+      }
+    }
+    if(parsed) {
+      objects.push(parsed);
+      i=endIndex;
+    }
+  }
+  return objects;
+}
+
+function parseSummaryObject(rawText) {
+  const trimmed=String(rawText??"").trim();
+  try {return JSON.parse(trimmed);}
+  catch(parseError) {
+    const objects=scanJsonObjects(trimmed);
+    if(!objects.length)throw Object.assign(parseError,{reasonCode:"model_output_invalid"});
+    const summaries=objects.filter(isSummaryObject);
+    if(!summaries.length)return objects[0];
+    if(summaries.length===1)return summaries[0];
+    // 模型偶发重复输出一致的决策块时取其一；若动作或标题自相矛盾则拒绝而不猜。
+    const first=summaries[0];
+    if(summaries.every(s=>s.action===first.action&&s.title===first.title))return first;
+    throw Object.assign(new Error("总结输出包含多个不一致的 JSON 决策"),{reasonCode:"model_output_invalid"});
+  }
+}
+
 export function candidateFrom(result,currentTitle,options={}) {
-  if(result.finishReason!=="stop")throw new Error("模型结束原因不是正常完成");
-  if(result.toolCalls?.length)throw new Error("总结模型返回了工具调用");
-  const value=JSON.parse(result.text);
-  if(Object.keys(value).sort().join(",")!=="action,reason,title"||!["keep","rename"].includes(value.action)||typeof value.title!=="string"||typeof value.reason!=="string")throw new Error("总结输出字段无效");
-  if(/https?:\/\/|\b(?:device_)?(?:sid|hash|mid)["']?\s*[=:]|\bsk-|[A-Za-z]:[\\/]|\\\\|\/Users\//i.test(value.reason))throw new Error("总结理由包含不允许的链接、凭据或私人路径");
+  if(result.finishReason!=="stop")throw Object.assign(new Error("模型结束原因不是正常完成"),{reasonCode:"model_output_invalid"});
+  if(result.toolCalls?.length)throw Object.assign(new Error("总结模型返回了工具调用"),{reasonCode:"model_output_invalid"});
+  const value=parseSummaryObject(result.text);
+  if(!isSummaryObject(value))throw Object.assign(new Error("总结输出字段无效"),{reasonCode:"model_output_invalid"});
+  if(/https?:\/\/|\b(?:device_)?(?:sid|hash|mid)["']?\s*[=:]|\bsk-|[A-Za-z]:[\\/]|\\\\|\/Users\//i.test(value.reason))throw Object.assign(new Error("总结理由包含不允许的链接、凭据或私人路径"),{reasonCode:"model_output_invalid"});
   const requireFormat=options.requireFormat!==false;
   // requireFormat=false：格式不作要求，keep/rename 都按模型原样返回
   if(!requireFormat)return{...value,title:value.title};
@@ -30,7 +100,7 @@ export function candidateFrom(result,currentTitle,options={}) {
   // 标记 invalid_keep_title 让调用方带反馈重试；rename 校验模型给出的新标题。
   const title=value.action==="keep"?currentTitle:value.title;
   const invalid=titleFormatError(title,{...options,requireFormat:true});
-  if(invalid)throw Object.assign(new Error(invalid),{code:value.action==="keep"?"invalid_keep_title":"invalid_title"});
+  if(invalid)throw Object.assign(new Error(invalid),{code:value.action==="keep"?"invalid_keep_title":"invalid_title",reasonCode:"model_output_invalid",reason:value.reason});
   return {...value,title};
 }
 
@@ -83,8 +153,7 @@ export async function runNaming({backend,selection,state={},apply=false,eventUse
     }catch(retryError) {
       // 纯问候/信息不足（如仅发送 hello）时 prompt 要求模型保持 keep 不臆造对象；二次仍确认 keep 则保留原标题待下轮再命名
       if(retryError.code!=="invalid_keep_title")throw retryError;
-      const parsed=JSON.parse(generated.text);
-      candidate={action:"keep",title:before.title,reason:parsed.reason};
+      candidate={action:"keep",title:before.title,reason:retryError.reason??parseSummaryObject(generated.text).reason};
     }
   }
   const result={status:"preview",action:candidate.action,title:candidate.title,reason:candidate.reason,usage:generated.usage};

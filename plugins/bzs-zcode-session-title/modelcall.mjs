@@ -210,33 +210,46 @@ function parseAnthropicResponse(payload,rawText,isSse) {
   };
 }
 
+function collectResponsesMessageTexts(items) {
+  const parts=[];
+  for(const item of items) {
+    for(const part of item.content) {
+      if((part?.type==="output_text"||part?.type==="text")&&typeof part.text==="string")parts.push(part.text);
+    }
+  }
+  return parts;
+}
+
 function parseOpenAiResponses(payload,rawText,isSse) {
   if(isSse) {
     const frames=parseSseFrames(rawText);
     let completed=null,text="";
     const toolCalls=[];
+    const doneMessages=[];
     for(const {event,data} of frames) {
       if(event==="error"||data?.type==="error")throwIfBusinessError(data);
       if(data?.type==="response.output_text.delta")text+=data.delta??"";
-      else if(data?.type==="response.output_item.done"&&data.item?.type==="function_call")toolCalls.push(data.item);
+      else if(data?.type==="response.output_item.done") {
+        if(data.item?.type==="function_call")toolCalls.push(data.item);
+        else if(data.item?.type==="message"&&Array.isArray(data.item.content))doneMessages.push(data.item);
+      }
       else if(data?.type==="response.completed"&&data.response)completed=data.response;
     }
     if(completed)return parseOpenAiResponses(completed,"",false);
-    return {text:unwrapJsonFence(text),finishReason:"stop",toolCalls,usage:null};
+    const finalDone=doneMessages.filter(item=>item.phase==="final_answer");
+    const finalParts=finalDone.length>0?collectResponsesMessageTexts(finalDone):[];
+    const effectiveText=finalParts.length>0?finalParts.join(""):text;
+    return {text:unwrapJsonFence(effectiveText),finishReason:"stop",toolCalls,usage:null};
   }
   throwIfBusinessError(payload);
   const output=Array.isArray(payload.output)?payload.output:[];
-  const textParts=[];
-  const toolCalls=[];
-  for(const item of output) {
-    if(item?.type==="message"&&Array.isArray(item.content)) {
-      for(const part of item.content) {
-        if((part?.type==="output_text"||part?.type==="text")&&typeof part.text==="string")textParts.push(part.text);
-      }
-    } else if(item?.type==="function_call") {
-      toolCalls.push(item);
-    }
-  }
+  const messageItems=output.filter(item=>item?.type==="message"&&Array.isArray(item.content));
+  const finalItems=messageItems.filter(item=>item.phase==="final_answer");
+  // Responses 通道（如 magpie）可能同时返回 commentary 与 final_answer 消息；
+  // 存在终答消息时优先提取终答，避免中间分析文本混入结构化输出。
+  const finalParts=finalItems.length>0?collectResponsesMessageTexts(finalItems):[];
+  const textParts=finalParts.length>0?finalParts:collectResponsesMessageTexts(messageItems);
+  const toolCalls=output.filter(item=>item?.type==="function_call");
   const text=textParts.length>0?textParts.join(""):(typeof payload.output_text==="string"?payload.output_text:"");
   const finishReason=payload.status==="incomplete"
     ?(payload.incomplete_details?.reason??"length")
@@ -360,7 +373,7 @@ export async function generateText({selection,provider,model,catalog,messages,ma
     throw Object.assign(new Error(`不支持的渠道协议类型：${apiType}`),{reasonCode:"unsupported_api_type"});
   }
 
-  let response;
+  let response,rawText;
   try {
     response=await fetchImpl(url,{
       method:"POST",
@@ -368,11 +381,11 @@ export async function generateText({selection,provider,model,catalog,messages,ma
       body:JSON.stringify(body),
       signal:AbortSignal.timeout(timeoutMs)
     });
+    rawText=await response.text();
   }catch(error) {
     throw Object.assign(new Error("模型请求失败："+error.message),{reasonCode:"model_request_failed",cause:error});
   }
 
-  const rawText=await response.text();
   const contentType=(response.headers?.get?.("content-type")??"").toLowerCase();
   const isSse=contentType.includes("event-stream")||(!rawText.trim().startsWith("{")&&rawText.includes("data:"));
   let payload=null;

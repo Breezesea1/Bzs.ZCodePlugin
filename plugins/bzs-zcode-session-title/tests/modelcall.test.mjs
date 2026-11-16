@@ -183,3 +183,47 @@ test("mintProjectToken 与 verifyProviderAuth：官方账号铸 token 与 API Ke
     {reasonCode:"credentials_invalid"}
   );
 });
+
+test("generateText：openai-responses 存在 final_answer 时忽略 commentary，且体读取超时标记 model_request_failed",async()=>{
+  const provider={
+    providerId:"magpie",
+    config:{
+      api:{type:"openai-responses",baseUrl:"http://127.0.0.1:3425"},
+      access:{type:"api-key",apiKey:"magpie-key"}
+    }
+  };
+  const model={
+    modelId:"bzs/auto/glm-5.3-flash",
+    config:{optionSpecs:{reasoningLevel:{values:["low"],map:`{"reasoning":{"effort":reasoningLevel}}`}}}
+  };
+  const result=await generateText({
+    selection:{providerId:"magpie",modelId:"bzs/auto/glm-5.3-flash",options:{reasoningLevel:"low"}},
+    provider,model,messages:sampleMessages,maxOutputTokens:2048,timeoutMs:5000,
+    fetchImpl:async()=>({
+      ok:true,status:200,
+      headers:new Headers({"content-type":"application/json"}),
+      text:async()=>JSON.stringify({
+        status:"completed",
+        output:[
+          {type:"message",phase:"commentary",role:"assistant",content:[{type:"output_text",text:"先分析一下上下文"}]},
+          {type:"message",phase:"final_answer",role:"assistant",content:[{type:"output_text",text:"{\"action\":\"keep\",\"title\":\"🧩 插件｜测试\",\"reason\":\"一致\"}"}]}
+        ],
+        usage:{input_tokens:10,output_tokens:20}
+      })
+    })
+  });
+  assert.equal(result.text,"{\"action\":\"keep\",\"title\":\"🧩 插件｜测试\",\"reason\":\"一致\"}");
+
+  await assert.rejects(
+    ()=>generateText({
+      selection:{providerId:"magpie",modelId:"bzs/auto/glm-5.3-flash",options:{reasoningLevel:"low"}},
+      provider,model,messages:sampleMessages,maxOutputTokens:2048,timeoutMs:5000,
+      fetchImpl:async()=>({
+        ok:true,status:200,
+        headers:new Headers({"content-type":"application/json"}),
+        text:async()=>{throw Object.assign(new Error("The operation was aborted due to timeout"),{name:"TimeoutError"});}
+      })
+    }),
+    {reasonCode:"model_request_failed"}
+  );
+});
